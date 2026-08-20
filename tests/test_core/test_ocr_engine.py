@@ -1,4 +1,4 @@
-"""Regressioni del lifecycle OCREngine."""
+"""Regressioni del lifecycle OCREngine SYCL-only."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ def test_initialize_cancellation_cleans_local_backend(monkeypatch) -> None:
         def initialize(self, *, cancel_token=None) -> None:
             assert cancel_token is not None
             cancel_token.cancel()
+            cancel_token.raise_if_cancelled()
 
         def shutdown(self) -> None:
             self.shutdown_calls += 1
@@ -35,11 +36,18 @@ def test_initialize_cancellation_cleans_local_backend(monkeypatch) -> None:
     engine = OCREngine()
     token = CancellationToken()
     with pytest.raises(OperationCancelledError):
-        engine.initialize("llama-cpp", cancel_token=token)
+        engine.initialize("llama-cpp-sycl", cancel_token=token)
 
     assert len(instances) == 1
+    assert instances[0].preferred_device == "llama-cpp-sycl"
     assert instances[0].shutdown_calls == 1
     assert engine.is_initialized is False
+
+
+def test_initialize_rejects_generic_llama_cpp_backend() -> None:
+    engine = OCREngine()
+    with pytest.raises(ModelLoadError):
+        engine.initialize("llama-cpp")
 
 
 def test_initialize_rejects_unknown_backend() -> None:

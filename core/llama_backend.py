@@ -1,4 +1,4 @@
-"""Backend GLM-OCR basato su un processo llama-server posseduto dall'app."""
+"""Backend GLM-OCR basato esclusivamente su llama-server + SYCL."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from core.event_bus import EventBus
 from core.exceptions import ModelLoadError, OperationCancelledError
 from core.llama_gpu_detect import (
     GPU_OFFLOAD_ALL_LAYERS,
-    GPU_OFFLOAD_PARTIAL_LAYERS,
     detect_gpu_backend,
     find_llama_server,
     venv_lib_env,
@@ -35,12 +34,13 @@ CONTEXT_SIZE = 4096
 BATCH_SIZE = 1024
 N_PARALLEL = 1
 MAX_OCR_RETRIES = 1
+SYCL_DEVICE = "llama-cpp-sycl"
 
 
 class LlamaServerBackend:
-    """Gestisce esclusivamente il llama-server avviato da questa istanza."""
+    """Gestisce esclusivamente un llama-server SYCL posseduto dall'app."""
 
-    def __init__(self, preferred_device: str = "llama-cpp-sycl") -> None:
+    def __init__(self, preferred_device: str = SYCL_DEVICE) -> None:
         self._preferred_device = preferred_device
         self._process: subprocess.Popen[Any] | None = None
         self._process_lock = threading.RLock()
@@ -50,7 +50,7 @@ class LlamaServerBackend:
         self._server_port = 0
         self._server_url = ""
         self._gpu_layers = 0
-        self._gpu_backend = "cpu"
+        self._gpu_backend = "unavailable"
         self._log_file: Any = None
 
     @property
@@ -85,8 +85,13 @@ class LlamaServerBackend:
     def initialize(
         self, *, cancel_token: CancellationToken | None = None,
     ) -> None:
-        """Trova runtime/modelli e avvia un server locale posseduto."""
+        """Trova runtime/modelli e avvia un server SYCL full-offload."""
         try:
+            if self._preferred_device != SYCL_DEVICE:
+                raise ModelLoadError(
+                    "llama-server",
+                    f"Backend non consentito: {self._preferred_device}. GLM OCR è SYCL-only.",
+                )
             if cancel_token is not None:
                 cancel_token.raise_if_cancelled()
 
@@ -94,22 +99,16 @@ class LlamaServerBackend:
             if not self._server_path:
                 raise ModelLoadError(
                     "llama-server",
-                    "llama-server non trovato. Esegui install.sh oppure installa llama-cpp.",
+                    "llama-server SYCL non trovato. Esegui install.sh.",
                 )
 
             self._model_paths = ensure_gguf_models(cancel_token=cancel_token)
-            self._gpu_layers, self._gpu_backend = detect_gpu_backend(
-                self._preferred_device
-            )
-            if (
-                self._preferred_device == "llama-cpp-sycl"
-                and self._gpu_backend != "sycl"
-            ):
+            self._gpu_layers, self._gpu_backend = detect_gpu_backend(SYCL_DEVICE)
+            if self._gpu_backend != "sycl":
                 raise ModelLoadError(
                     "llama-server",
-                    "Backend SYCL richiesto ma nessun device SYCL è esposto "
-                    "da llama-server. Seleziona llama.cpp generico oppure "
-                    "ricompila con GGML_SYCL=ON.",
+                    "Nessun device SYCL esposto da llama-server. "
+                    "CPU e Vulkan sono disabilitati: ricompila con GGML_SYCL=ON.",
                 )
 
             self._start_server_with_fallback(cancel_token=cancel_token)
@@ -117,8 +116,6 @@ class LlamaServerBackend:
                 cancel_token.raise_if_cancelled()
             self._initialized = True
         except Exception:
-            # initialize() è transazionale: in nessun percorso d'errore deve
-            # restare in vita il processo figlio creato durante il tentativo.
             self._initialized = False
             self._stop_server()
             raise
@@ -132,56 +129,33 @@ class LlamaServerBackend:
     def _start_server_with_fallback(
         self, *, cancel_token: CancellationToken | None = None,
     ) -> None:
-        configs: list[tuple[int, str, str]] = []
-        if self._gpu_backend in ("sycl", "vulkan") and self._gpu_layers > 0:
-            configs.extend(
-                [
-                    (
-                        GPU_OFFLOAD_ALL_LAYERS,
-                        self._gpu_backend,
-                        f"GPU full offload ({self._gpu_backend.upper()})",
-                    ),
-                    (
-                        GPU_OFFLOAD_PARTIAL_LAYERS,
-                        self._gpu_backend,
-                        f"GPU partial offload ({self._gpu_backend.upper()})",
-                    ),
-                ]
+        """Avvia esclusivamente il profilo SYCL full-offload.
+
+        Il nome del metodo è mantenuto per compatibilità interna, ma non esiste
+        alcun fallback: niente Vulkan, niente CPU-only e niente offload parziale.
+        """
+        if self._gpu_backend != "sycl":
+            raise ModelLoadError(
+                "llama-server",
+                "Backend SYCL non disponibile; fallback disabilitati.",
             )
-
-        # La voce esplicita SYCL è strict: non deve ricadere silenziosamente
-        # su CPU. La voce generica può invece degradare fino alla CPU.
-        if self._preferred_device != "llama-cpp-sycl":
-            configs.append((0, "cpu", "CPU-only"))
-        if not configs:
-            configs.append((0, "cpu", "CPU-only"))
-
-        last_error: Exception | None = None
-        for gpu_layers, gpu_backend, label in configs:
-            if cancel_token is not None:
-                cancel_token.raise_if_cancelled()
-            try:
-                self._start_server(
-                    gpu_layers=gpu_layers,
-                    gpu_backend=gpu_backend,
-                    cancel_token=cancel_token,
-                )
-                self._gpu_layers = gpu_layers
-                self._gpu_backend = gpu_backend
-                logger.info("llama-server avviato: %s", label)
-                return
-            except OperationCancelledError:
-                self._stop_server()
-                raise
-            except ModelLoadError as exc:
-                last_error = exc
-                logger.warning("Profilo %s fallito: %s", label, exc)
-                self._stop_server()
-
-        raise ModelLoadError(
-            "llama-server",
-            f"Nessun profilo di avvio riuscito: {last_error}",
-        )
+        if cancel_token is not None:
+            cancel_token.raise_if_cancelled()
+        try:
+            self._start_server(
+                gpu_layers=GPU_OFFLOAD_ALL_LAYERS,
+                gpu_backend="sycl",
+                cancel_token=cancel_token,
+            )
+            self._gpu_layers = GPU_OFFLOAD_ALL_LAYERS
+            self._gpu_backend = "sycl"
+            logger.info("llama-server avviato: SYCL full offload")
+        except OperationCancelledError:
+            self._stop_server()
+            raise
+        except ModelLoadError:
+            self._stop_server()
+            raise
 
     def _start_server(
         self,
@@ -192,6 +166,11 @@ class LlamaServerBackend:
     ) -> None:
         if not self._server_path:
             raise ModelLoadError("llama-server", "Percorso server mancante")
+        if gpu_backend != "sycl" or gpu_layers < GPU_OFFLOAD_ALL_LAYERS:
+            raise ModelLoadError(
+                "llama-server",
+                "Profilo non SYCL/full-offload rifiutato dalla configurazione strict.",
+            )
 
         main_model = self._model_paths.get("main")
         mmproj_model = self._model_paths.get("mmproj")
@@ -217,7 +196,7 @@ class LlamaServerBackend:
             "--host",
             LLAMA_SERVER_HOST,
             "-ngl",
-            str(gpu_layers),
+            str(GPU_OFFLOAD_ALL_LAYERS),
             "-c",
             str(CONTEXT_SIZE),
             "-b",
@@ -232,14 +211,13 @@ class LlamaServerBackend:
         ]
 
         env = venv_lib_env()
-        if gpu_backend == "sycl" and gpu_layers > 0:
-            env.update(
-                {
-                    "GGML_SYCL": "1",
-                    "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
-                    "ZES_ENABLE_SYSMAN": "1",
-                }
-            )
+        env.update(
+            {
+                "GGML_SYCL": "1",
+                "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
+                "ZES_ENABLE_SYSMAN": "1",
+            }
+        )
 
         AppMeta.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         log_path = AppMeta.CONFIG_DIR / "llama-server.log"
@@ -248,12 +226,7 @@ class LlamaServerBackend:
 
         EventBus.emit(
             "model_load_progress",
-            {
-                "message": (
-                    "Avvio llama-server "
-                    f"({'GPU' if gpu_layers > 0 else 'CPU'})..."
-                )
-            },
+            {"message": "Avvio llama-server (SYCL full offload)..."},
         )
 
         log_file: Any = None
@@ -314,7 +287,7 @@ class LlamaServerBackend:
 
         self._stop_server()
         raise ModelLoadError(
-            "llama-server", "Il server non ha risposto entro 90 secondi"
+            "llama-server", "Il server SYCL non ha risposto entro 90 secondi"
         )
 
     @staticmethod
@@ -361,17 +334,16 @@ class LlamaServerBackend:
     def _ensure_server_ready(
         self, *, cancel_token: CancellationToken | None,
     ) -> None:
-        """Ripristina il server se è morto tra due richieste OCR."""
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
         if self.is_server_running:
             return
-        logger.warning("llama-server non disponibile; tento il riavvio")
+        logger.warning("llama-server SYCL non disponibile; tento il riavvio strict")
         self._stop_server()
         self._start_server_with_fallback(cancel_token=cancel_token)
         if not self.is_server_running:
             raise ModelLoadError(
-                "llama-server", "Server non disponibile dopo il riavvio"
+                "llama-server", "Server SYCL non disponibile dopo il riavvio"
             )
 
     def process_image(
@@ -394,12 +366,7 @@ class LlamaServerBackend:
         start = time.perf_counter()
         last_exc: Exception | None = None
 
-        # Un PDF singolo emette checkpoint pagina-per-pagina. Ripartire da
-        # pagina 1 dopo un crash duplicherebbe nella UI le pagine già emesse;
-        # per questo non eseguiamo un replay automatico di quel documento.
-        max_retries = (
-            0 if is_pdf_file and mode == "single" else MAX_OCR_RETRIES
-        )
+        max_retries = 0 if is_pdf_file and mode == "single" else MAX_OCR_RETRIES
 
         for attempt in range(max_retries + 1):
             try:
@@ -423,21 +390,11 @@ class LlamaServerBackend:
                     )
 
                 elapsed_ms = (time.perf_counter() - start) * 1000
-                device_label = "CPU (llama.cpp)"
-                if self._gpu_layers > 0:
-                    kind = (
-                        "GPU"
-                        if self._gpu_layers >= GPU_OFFLOAD_ALL_LAYERS
-                        else "GPU+CPU"
-                    )
-                    device_label = (
-                        f"{kind} {self._gpu_backend.upper()} (llama.cpp)"
-                    )
                 return OCRResult(
                     text=text,
                     confidence=confidence,
                     processing_time_ms=elapsed_ms,
-                    device_used=device_label,
+                    device_used="GPU SYCL (llama.cpp)",
                 )
             except OperationCancelledError:
                 raise
@@ -454,14 +411,12 @@ class LlamaServerBackend:
                 )
                 if crashed and attempt < max_retries:
                     logger.warning(
-                        "llama-server crashato durante OCR; riavvio e retry %d/%d",
+                        "llama-server SYCL crashato durante OCR; riavvio e retry %d/%d",
                         attempt + 1,
                         max_retries,
                     )
                     self._stop_server()
-                    self._start_server_with_fallback(
-                        cancel_token=cancel_token
-                    )
+                    self._start_server_with_fallback(cancel_token=cancel_token)
                     continue
                 break
 

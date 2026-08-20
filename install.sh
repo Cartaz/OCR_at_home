@@ -46,6 +46,12 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
+venv_llama_works() {
+    [[ -x "$VENV_DIR/bin/llama-server" ]] || return 1
+    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$VENV_DIR/bin/llama-server" --version >/dev/null 2>&1
+}
+
 build_sycl_llama() {
     if [[ ! -f /opt/intel/oneapi/setvars.sh ]]; then
         warn "Intel oneAPI non trovato: salto la build SYCL locale."
@@ -75,8 +81,12 @@ build_sycl_llama() {
     jobs="$(( ($(nproc) + 1) / 2 ))"
     (( jobs < 1 )) && jobs=1
 
-    bash -c "
-        set -euo pipefail
+    # Gli script oneAPI non sono compatibili con `set -u`: alcune versioni
+    # leggono variabili opzionali (es. OCL_ICD_FILENAMES) prima di definirle.
+    # Manteniamo errexit/pipefail nel sottoprocesso, ma non nounset.
+    if ! bash -c "
+        set -eo pipefail
+        export OCL_ICD_FILENAMES=\"\${OCL_ICD_FILENAMES:-}\"
         source /opt/intel/oneapi/setvars.sh >/dev/null
         cmake -S '$LLAMA_SRC' -B '$LLAMA_BUILD' \\
             -DGGML_SYCL=ON \\
@@ -85,11 +95,14 @@ build_sycl_llama() {
             -DCMAKE_BUILD_TYPE=Release \\
             -DLLAMA_OPENSSL=OFF
         cmake --build '$LLAMA_BUILD' --config Release --target llama-server -j'$jobs'
-    "
+    "; then
+        warn "Compilazione llama.cpp SYCL fallita."
+        return 1
+    fi
 
     local server="$LLAMA_BUILD/bin/llama-server"
     if [[ ! -x "$server" ]]; then
-        warn "Build completata ma llama-server non è stato trovato."
+        warn "Build terminata senza produrre llama-server."
         return 1
     fi
 
@@ -113,8 +126,10 @@ build_sycl_llama() {
         warn "Nessuna libreria condivisa llama.cpp copiata; verifica la build."
     fi
 
-    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$VENV_DIR/bin/llama-server" --version >/dev/null
+    if ! venv_llama_works; then
+        warn "llama-server compilato ma non eseguibile con le librerie installate."
+        return 1
+    fi
 
     # --list-devices è l'interfaccia upstream usata anche dall'app per
     # verificare che il backend compilato esponga davvero una GPU SYCL.
@@ -126,10 +141,14 @@ build_sycl_llama() {
 }
 
 if ! build_sycl_llama; then
-    if command -v llama-server >/dev/null 2>&1; then
+    if venv_llama_works; then
+        warn "La nuova build SYCL è fallita: mantengo il llama-server già presente nel venv."
+    elif command -v llama-server >/dev/null 2>&1; then
         log "Uso il llama-server di sistema: $(command -v llama-server)"
     else
-        warn "Nessun llama-server disponibile. Su Arch/CachyOS installa 'llama-cpp'; per SYCL usa una build compatibile o rilancia dopo aver installato oneAPI."
+        warn "Installazione incompleta: nessun llama-server eseguibile disponibile."
+        warn "Verifica oneAPI/CMake oppure installa 'llama-cpp' e rilancia install.sh."
+        exit 1
     fi
 fi
 

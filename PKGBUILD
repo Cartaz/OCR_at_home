@@ -1,8 +1,8 @@
 # Maintainer: Cartaz
 pkgname=glm-ocr
 pkgver=1.0.0
-pkgrel=2
-pkgdesc="OCR locale con GLM-OCR e llama.cpp"
+pkgrel=3
+pkgdesc="OCR locale con GLM-OCR e llama.cpp SYCL"
 arch=('x86_64')
 url="https://github.com/Cartaz/OCR_at_home"
 license=('MIT')
@@ -14,12 +14,9 @@ depends=(
     'python-pymupdf'
     'python-huggingface-hub'
     'llama-cpp'
+    'ggml-sycl'
 )
 makedepends=('git')
-optdepends=(
-    'ggml-sycl: backend SYCL per GPU Intel (sostituisce ggml generico)'
-    'ggml-vulkan: backend Vulkan per GPU compatibili'
-)
 source=("$pkgname::git+https://github.com/Cartaz/OCR_at_home.git")
 sha256sums=('SKIP')
 
@@ -52,7 +49,7 @@ EOF
 [Desktop Entry]
 Type=Application
 Name=GLM OCR
-Comment=Riconoscimento ottico locale con GLM-OCR e llama.cpp
+Comment=Riconoscimento ottico locale con GLM-OCR e llama.cpp SYCL
 Exec=glm-ocr
 Icon=glm-ocr
 Terminal=false

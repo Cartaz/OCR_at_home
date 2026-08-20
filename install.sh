@@ -14,6 +14,28 @@ APP_ID="com.glm-ocr.app"
 log() { printf '\n==> %s\n' "$*"; }
 warn() { printf '\nATTENZIONE: %s\n' "$*" >&2; }
 
+require_project_files() {
+    local missing=0
+    local relative
+    for relative in \
+        requirements.txt \
+        main.py \
+        core/__init__.py \
+        core/llama_models.py \
+        config/__init__.py \
+        config/constants.py
+    do
+        if [[ ! -f "$SCRIPT_DIR/$relative" ]]; then
+            warn "File applicativo mancante: $relative"
+            missing=1
+        fi
+    done
+    if [[ "$missing" -ne 0 ]]; then
+        warn "Albero sorgente incompleto: estrai l'archivio completo/repair nella root OCR_at_home."
+        return 1
+    fi
+}
+
 find_python() {
     local candidate
     for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
@@ -30,6 +52,8 @@ PY
     done
     return 1
 }
+
+require_project_files
 
 PYTHON_CMD="$(find_python || true)"
 if [[ -z "$PYTHON_CMD" ]]; then
@@ -48,12 +72,21 @@ venv_llama_sycl_works() {
     [[ -x "$VENV_DIR/bin/llama-server" ]] || return 1
     local output
     if ! output="$(
+        ZES_ENABLE_SYSMAN=1 \
+        ONEAPI_DEVICE_SELECTOR=level_zero:0 \
         LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             "$VENV_DIR/bin/llama-server" --list-devices 2>&1
     )"; then
         return 1
     fi
     grep -Eiq '(^|[[:space:]])SYCL[0-9]+[[:space:]]*:' <<<"$output"
+}
+
+show_sycl_devices() {
+    ZES_ENABLE_SYSMAN=1 \
+    ONEAPI_DEVICE_SELECTOR=level_zero:0 \
+    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$VENV_DIR/bin/llama-server" --list-devices
 }
 
 build_sycl_llama() {
@@ -90,6 +123,7 @@ build_sycl_llama() {
     if ! bash -c "
         set -eo pipefail
         export OCL_ICD_FILENAMES=\"\${OCL_ICD_FILENAMES:-}\"
+        export ZES_ENABLE_SYSMAN=1
         source /opt/intel/oneapi/setvars.sh >/dev/null
         cmake -S '$LLAMA_SRC' -B '$LLAMA_BUILD' \\
             -DGGML_SYCL=ON \\
@@ -134,15 +168,15 @@ build_sycl_llama() {
         return 1
     fi
 
-    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$VENV_DIR/bin/llama-server" --list-devices
+    show_sycl_devices
     log "llama-server SYCL installato nel venv"
 }
 
-if ! build_sycl_llama; then
-    if venv_llama_sycl_works; then
-        warn "La nuova build è fallita: mantengo il precedente llama-server SYCL verificato."
-    else
+if venv_llama_sycl_works; then
+    log "llama-server SYCL già presente e verificato: riuso la build esistente"
+    show_sycl_devices
+else
+    if ! build_sycl_llama; then
         warn "Installazione interrotta: nessun llama-server SYCL funzionante disponibile."
         warn "CPU e Vulkan non sono fallback consentiti da GLM OCR."
         exit 1
@@ -155,12 +189,23 @@ if ! venv_llama_sycl_works; then
 fi
 
 log "Verifica/download modelli GGUF"
-PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python" - <<'PY'
+(
+    cd "$SCRIPT_DIR"
+    PROJECT_ROOT="$SCRIPT_DIR" "$VENV_DIR/bin/python" - <<'PY'
+import os
+import sys
+
+root = os.environ["PROJECT_ROOT"]
+if root not in sys.path:
+    sys.path.insert(0, root)
+
 from core.llama_models import ensure_gguf_models
+
 paths = ensure_gguf_models()
 for kind, path in paths.items():
     print(f"  {kind}: {path}")
 PY
+)
 
 log "Integrazione desktop utente"
 DESKTOP_DIR="$HOME/.local/share/applications"

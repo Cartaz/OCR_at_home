@@ -149,9 +149,51 @@ def ocr_image_api(
         text = result["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"Risposta inattesa da llama-server: {exc}") from exc
+
     elapsed = time.perf_counter() - t_start
     usage = result.get("usage", {})
-    n_tokens = int(usage.get("completion_tokens", 0) or 0)
-    logger.info("llama.cpp: %d token in %.1fs (%.1f token/s)", n_tokens, elapsed, n_tokens / elapsed if elapsed else 0.0)
+    timings = result.get("timings", {}) or {}
+
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    predicted_n = int(timings.get("predicted_n", completion_tokens) or completion_tokens)
+    prompt_n = int(timings.get("prompt_n", prompt_tokens) or prompt_tokens)
+    cache_n = int(timings.get("cache_n", 0) or 0)
+    predicted_ms = float(timings.get("predicted_ms", 0.0) or 0.0)
+    prompt_ms = float(timings.get("prompt_ms", 0.0) or 0.0)
+    predicted_tps = float(timings.get("predicted_per_second", 0.0) or 0.0)
+    prompt_tps = float(timings.get("prompt_per_second", 0.0) or 0.0)
+
+    if predicted_tps <= 0.0 and predicted_ms > 0.0:
+        predicted_tps = predicted_n / (predicted_ms / 1000.0)
+    if prompt_tps <= 0.0 and prompt_ms > 0.0:
+        prompt_tps = prompt_n / (prompt_ms / 1000.0)
+
+    accounted = (predicted_ms + prompt_ms) / 1000.0
+    other_s = max(0.0, elapsed - accounted)
+
+    if timings:
+        logger.info(
+            "llama.cpp timings: generation=%d tok %.1fs (%.1f tok/s); "
+            "prompt=%d tok + %d cached %.1fs (%.1f tok/s); "
+            "vision/overhead≈%.1fs; request=%.1fs",
+            predicted_n,
+            predicted_ms / 1000.0,
+            predicted_tps,
+            prompt_n,
+            cache_n,
+            prompt_ms / 1000.0,
+            prompt_tps,
+            other_s,
+            elapsed,
+        )
+    else:
+        logger.info(
+            "llama.cpp: %d completion token in %.1fs total request "
+            "(server timings non disponibili)",
+            completion_tokens,
+            elapsed,
+        )
+
     text = str(text).strip()
     return text, 0.9 if text else 0.1

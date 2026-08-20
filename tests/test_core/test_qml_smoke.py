@@ -15,6 +15,8 @@ class DummyBackend(QObject):
     @Property(bool, constant=True)
     def busy(self): return False
     @Property(bool, constant=True)
+    def modelLoading(self): return False
+    @Property(bool, constant=True)
     def ocrRunning(self): return False
     @Property(bool, constant=True)
     def batchRunning(self): return False
@@ -101,3 +103,10 @@ def test_main_qml_loads() -> None:
         obj.close()
     engine.deleteLater()
     _ = app
+
+
+def test_main_qml_keeps_safe_controls_available_during_model_load() -> None:
+    text = (Path(__file__).parents[2] / "qml" / "Main.qml").read_text(encoding="utf-8")
+    assert "enabled: !backend.busy && !backend.modelLoading" in text
+    assert "backend.ocrRunning || backend.modelLoading" in text
+    assert "backend.batchRunning || backend.modelLoading" in text

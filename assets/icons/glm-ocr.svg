@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Sfondo circolare -->
+  <circle cx="64" cy="64" r="60" fill="#1b1e20" stroke="#00bfa5" stroke-width="3"/>
+  <!-- Documento stilizzato -->
+  <rect x="36" y="28" width="56" height="72" rx="4" fill="#232629" stroke="#3f4347" stroke-width="2"/>
+  <!-- Linee di testo OCR -->
+  <line x1="44" y1="44" x2="84" y2="44" stroke="#00bfa5" stroke-width="3" stroke-linecap="round"/>
+  <line x1="44" y1="56" x2="78" y2="56" stroke="#a0a4a8" stroke-width="2" stroke-linecap="round"/>
+  <line x1="44" y1="66" x2="80" y2="66" stroke="#a0a4a8" stroke-width="2" stroke-linecap="round"/>
+  <line x1="44" y1="76" x2="72" y2="76" stroke="#a0a4a8" stroke-width="2" stroke-linecap="round"/>
+  <!-- Lente d'ingrandimento -->
+  <circle cx="78" cy="78" r="14" fill="none" stroke="#00bfa5" stroke-width="3"/>
+  <line x1="88" y1="88" x2="98" y2="98" stroke="#00bfa5" stroke-width="4" stroke-linecap="round"/>
+  <!-- Lettera A nella lente -->
+  <text x="78" y="84" font-family="Noto Sans, sans-serif" font-size="16" font-weight="bold" fill="#00bfa5" text-anchor="middle">A</text>
+</svg>

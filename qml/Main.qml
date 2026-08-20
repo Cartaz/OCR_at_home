@@ -26,14 +26,14 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Q"; onActivated: backend.forceQuit() }
     Shortcut { sequence: "Ctrl+M"; onActivated: backend.minimizeToTray() }
 
-    Shortcut { sequence: "Ctrl+R"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.startOcr() }
-    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 0 && backend.ocrRunning; onActivated: backend.stopOcr() }
-    Shortcut { sequence: "F5"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.refreshDevices() }
+    Shortcut { sequence: "Ctrl+R"; enabled: window.currentTab === 0 && !backend.busy && !backend.modelLoading; onActivated: backend.startOcr() }
+    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 0 && (backend.ocrRunning || backend.modelLoading); onActivated: backend.stopOcr() }
+    Shortcut { sequence: "F5"; enabled: window.currentTab === 0 && !backend.busy && !backend.modelLoading; onActivated: backend.refreshDevices() }
     Shortcut { sequence: "Ctrl+L"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.clearOcr() }
     Shortcut { sequence: "Ctrl+Shift+S"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.saveOcr() }
 
-    Shortcut { sequence: "Ctrl+B"; enabled: window.currentTab === 1 && !backend.busy; onActivated: backend.startBatch() }
-    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 1 && backend.batchRunning; onActivated: backend.stopBatch() }
+    Shortcut { sequence: "Ctrl+B"; enabled: window.currentTab === 1 && !backend.busy && !backend.modelLoading; onActivated: backend.startBatch() }
+    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 1 && (backend.batchRunning || backend.modelLoading); onActivated: backend.stopBatch() }
     Shortcut { sequence: "Ctrl+L"; enabled: window.currentTab === 1 && !backend.busy; onActivated: backend.clearBatch() }
     Shortcut { sequence: "Ctrl+Shift+S"; enabled: window.currentTab === 1 && !backend.busy; onActivated: backend.saveBatch() }
 
@@ -132,7 +132,7 @@ ApplicationWindow {
                                 model: backend.devices
                                 textRole: "label"
                                 currentIndex: backend.deviceIndex
-                                enabled: !backend.busy
+                                enabled: !backend.busy && !backend.modelLoading
                                 Layout.fillWidth: true
                                 onActivated: backend.setDeviceIndex(index)
                             }
@@ -173,9 +173,9 @@ ApplicationWindow {
                             columnSpacing: 8
                             Layout.fillWidth: true
 
-                            ActionUnit { label: "Avvia OCR"; shortcutText: "Ctrl+R"; primary: true; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.startOcr() }
-                            ActionUnit { label: "Ferma"; shortcutText: "Ctrl+S"; danger: true; buttonEnabled: backend.ocrRunning; Layout.fillWidth: true; onTriggered: backend.stopOcr() }
-                            ActionUnit { label: "Aggiorna"; shortcutText: "F5"; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.refreshDevices() }
+                            ActionUnit { label: "Avvia OCR"; shortcutText: "Ctrl+R"; primary: true; buttonEnabled: !backend.busy && !backend.modelLoading; Layout.fillWidth: true; onTriggered: backend.startOcr() }
+                            ActionUnit { label: "Ferma"; shortcutText: "Ctrl+S"; danger: true; buttonEnabled: backend.ocrRunning || backend.modelLoading; Layout.fillWidth: true; onTriggered: backend.stopOcr() }
+                            ActionUnit { label: "Aggiorna"; shortcutText: "F5"; buttonEnabled: !backend.busy && !backend.modelLoading; Layout.fillWidth: true; onTriggered: backend.refreshDevices() }
                             ActionUnit { label: "Cancella"; shortcutText: "Ctrl+L"; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.clearOcr() }
                             ActionUnit { label: "Salva Testo"; shortcutText: "Ctrl+Shift+S"; buttonEnabled: !backend.busy && backend.ocrText.trim().length > 0; Layout.fillWidth: true; onTriggered: backend.saveOcr() }
                             Item { Layout.fillWidth: true; Layout.preferredHeight: theme.controlHeight }
@@ -249,8 +249,8 @@ ApplicationWindow {
                             columnSpacing: 8
                             Layout.fillWidth: true
 
-                            ActionUnit { label: "Avvia Batch"; shortcutText: "Ctrl+B"; primary: true; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.startBatch() }
-                            ActionUnit { label: "Ferma"; shortcutText: "Ctrl+S"; danger: true; buttonEnabled: backend.batchRunning; Layout.fillWidth: true; onTriggered: backend.stopBatch() }
+                            ActionUnit { label: "Avvia Batch"; shortcutText: "Ctrl+B"; primary: true; buttonEnabled: !backend.busy && !backend.modelLoading; Layout.fillWidth: true; onTriggered: backend.startBatch() }
+                            ActionUnit { label: "Ferma"; shortcutText: "Ctrl+S"; danger: true; buttonEnabled: backend.batchRunning || backend.modelLoading; Layout.fillWidth: true; onTriggered: backend.stopBatch() }
                             ActionUnit { label: "Cancella"; shortcutText: "Ctrl+L"; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.clearBatch() }
                             ActionUnit { label: "Salva Testo"; shortcutText: "Ctrl+Shift+S"; buttonEnabled: !backend.busy && backend.batchText.trim().length > 0; Layout.fillWidth: true; onTriggered: backend.saveBatch() }
                         }

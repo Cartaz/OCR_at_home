@@ -1,4 +1,4 @@
-"""Test del backend llama-server senza avviare un modello reale."""
+"""Test del backend llama-server SYCL senza avviare un modello reale."""
 
 from __future__ import annotations
 
@@ -11,8 +11,14 @@ from core.exceptions import ModelLoadError
 from core.llama_backend import LlamaServerBackend
 
 
-def test_single_pdf_disables_whole_document_replay(monkeypatch, tmp_path: Path) -> None:
+def test_generic_backend_is_rejected_before_startup() -> None:
     backend = LlamaServerBackend(preferred_device="llama-cpp")
+    with pytest.raises(ModelLoadError):
+        backend.initialize()
+
+
+def test_single_pdf_disables_whole_document_replay(monkeypatch, tmp_path: Path) -> None:
+    backend = LlamaServerBackend(preferred_device="llama-cpp-sycl")
     backend._initialized = True  # type: ignore[attr-defined]
     backend._server_url = "http://127.0.0.1:12345"  # type: ignore[attr-defined]
     backend._process = SimpleNamespace(poll=lambda: None)  # type: ignore[attr-defined]

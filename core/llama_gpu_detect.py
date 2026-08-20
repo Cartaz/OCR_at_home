@@ -1,4 +1,4 @@
-"""Rilevamento backend GPU per llama.cpp (SYCL, Vulkan, CPU)."""
+"""Rilevamento esclusivo del backend SYCL per llama.cpp."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 GPU_OFFLOAD_ALL_LAYERS = 99
-GPU_OFFLOAD_PARTIAL_LAYERS = 20
+# Alias mantenuto per compatibilità con codice/test esistenti. Non rappresenta
+# più un profilo parziale: GLM OCR non deve ricadere sulla CPU.
+GPU_OFFLOAD_PARTIAL_LAYERS = GPU_OFFLOAD_ALL_LAYERS
 
 
 def _project_root() -> Path:
@@ -46,7 +48,6 @@ def find_llama_server() -> str | None:
 
 
 def _list_devices_text(server_path: str | None) -> str:
-    """Interroga llama-server con l'API CLI ufficiale --list-devices."""
     if not server_path:
         return ""
     try:
@@ -65,87 +66,64 @@ def _list_devices_text(server_path: str | None) -> str:
 
 
 def llama_server_supports_backend(server_path: str, backend: str) -> bool:
-    """Verifica il backend compilato, con --list-devices come segnale forte."""
+    """Verifica esclusivamente che il binary esponga SYCL."""
+    if backend != "sycl":
+        return False
+
     env = venv_lib_env()
     devices = _list_devices_text(server_path).lower()
-    if backend == "sycl" and re.search(r"\bsycl\d+\s*:", devices):
-        return True
-    if backend == "vulkan" and re.search(r"\bvulkan\d+\s*:", devices):
+    if re.search(r"\bsycl\d+\s*:", devices):
         return True
 
-    try:
-        for args in (["--version"], ["--help"]):
-            try:
-                result = subprocess.run(
-                    [server_path, *args],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    env=env,
-                )
-                text = (result.stdout + result.stderr).lower()
-                if backend == "sycl" and any(
-                    token in text
-                    for token in (
-                        "libggml-sycl",
-                        "ggml_sycl",
-                        "intelllvm",
-                        "intel llvm",
-                        "dpc++",
-                    )
-                ):
-                    return True
-                if backend == "vulkan" and "ggml_vulkan" in text:
-                    return True
-                if backend not in ("sycl", "vulkan") and backend in text:
-                    return True
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
-
-        # Le build shared del progetto locale espongono chiaramente il plugin
-        # nel linkage dinamico. È il fallback più affidabile per versioni che
-        # non implementano ancora --list-devices.
+    for args in (["--version"], ["--help"]):
         try:
             result = subprocess.run(
-                ["ldd", server_path],
+                [server_path, *args],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 env=env,
             )
-            text = result.stdout.lower()
-            if backend == "sycl" and any(
+            text = (result.stdout + result.stderr).lower()
+            if any(
                 token in text
-                for token in ("libsycl", "libggml-sycl", "libze_loader")
-            ):
-                return True
-            if backend == "vulkan" and (
-                "libggml-vulkan" in text or "libvulkan" in text
+                for token in (
+                    "libggml-sycl",
+                    "ggml_sycl",
+                    "intelllvm",
+                    "intel llvm",
+                    "dpc++",
+                )
             ):
                 return True
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
-    except Exception as exc:
-        logger.debug("Verifica backend %s fallita: %s", backend, exc)
-    return False
+
+    try:
+        result = subprocess.run(
+            ["ldd", server_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        text = result.stdout.lower()
+        return any(
+            token in text
+            for token in ("libsycl", "libggml-sycl", "libze_loader")
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def detect_gpu_backend(preferred_device: str | None = None) -> tuple[int, str]:
-    """Rileva il backend rispettando la scelta esplicita dell'utente."""
-    server_path = find_llama_server()
-    if preferred_device == "llama-cpp-sycl":
-        if _check_sycl(server_path):
-            return GPU_OFFLOAD_ALL_LAYERS, "sycl"
+    """Restituisce SYCL oppure unavailable; non esistono fallback."""
+    if preferred_device not in (None, "llama-cpp-sycl"):
         return 0, "unavailable"
-    if preferred_device == "llama-cpp":
-        if _check_vulkan(server_path):
-            return GPU_OFFLOAD_ALL_LAYERS, "vulkan"
-        return 0, "cpu"
+    server_path = find_llama_server()
     if _check_sycl(server_path):
         return GPU_OFFLOAD_ALL_LAYERS, "sycl"
-    if _check_vulkan(server_path):
-        return GPU_OFFLOAD_ALL_LAYERS, "vulkan"
-    return 0, "cpu"
+    return 0, "unavailable"
 
 
 def _intel_gpu_present() -> bool:
@@ -177,7 +155,6 @@ def _check_sycl(server_path: str | None) -> bool:
     if re.search(r"\bSYCL\d+\s*:", devices, flags=re.IGNORECASE):
         return True
 
-    # Fallback per vecchie versioni: Level Zero + GPU Intel + binary SYCL.
     ze_loader_found = any(
         Path(path).exists()
         for path in (
@@ -191,29 +168,4 @@ def _check_sycl(server_path: str | None) -> bool:
         and _intel_gpu_present()
         and server_path
         and llama_server_supports_backend(server_path, "sycl")
-    )
-
-
-def _check_vulkan(server_path: str | None) -> bool:
-    devices = _list_devices_text(server_path)
-    if re.search(r"\bVulkan\d+\s*:", devices, flags=re.IGNORECASE):
-        return True
-
-    try:
-        result = subprocess.run(
-            ["vulkaninfo", "--summary"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        text = result.stdout.lower()
-        driver_ok = result.returncode == 0 and (
-            "devicename" in text or "gpu" in text or "physical device" in text
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        driver_ok = False
-    return bool(
-        driver_ok
-        and server_path
-        and llama_server_supports_backend(server_path, "vulkan")
     )

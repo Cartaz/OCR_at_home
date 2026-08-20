@@ -20,13 +20,14 @@ find_python() {
     local candidate
     for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
         if command -v "$candidate" >/dev/null 2>&1; then
-            "$candidate" - <<'PY' >/dev/null 2>&1 && {
-                printf '%s\n' "$candidate"
-                return 0
-            }
+            if "$candidate" - <<'PY' >/dev/null 2>&1
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
+            then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
         fi
     done
     return 1

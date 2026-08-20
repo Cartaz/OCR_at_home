@@ -14,6 +14,7 @@ from core.app_controller import (
     OP_IDLE,
     OP_MODEL_LOADING,
     OP_OCR,
+    OP_SHUTTING_DOWN,
     AppController,
 )
 from ui.event_bridge import EventBridge
@@ -152,7 +153,14 @@ class QmlBridge(QObject):
 
     @Property(bool, notify=stateChanged)
     def busy(self) -> bool:
-        return self._operation != OP_IDLE
+        """Blocca solo lavoro OCR/Batch e shutdown, non il model-load.
+
+        Il caricamento modello avviene in un QThread separato e non deve
+        rendere inutilizzabile la UI: durante il load è sicuro scegliere file,
+        cambiare lingua/preprocessing e preparare il batch. Le azioni che
+        toccano l'engine sono protette separatamente da ``modelLoading``.
+        """
+        return self._operation in (OP_OCR, OP_BATCH, OP_SHUTTING_DOWN)
 
     @Property(bool, notify=stateChanged)
     def modelLoading(self) -> bool:
@@ -274,7 +282,7 @@ class QmlBridge(QObject):
 
     @Slot(int)
     def setDeviceIndex(self, index: int) -> None:
-        if self.busy or not (0 <= index < len(self._devices)):
+        if self.busy or self.modelLoading or not (0 <= index < len(self._devices)):
             return
         item = self._devices[index]
         if not bool(item.get("available", False)):
@@ -296,7 +304,7 @@ class QmlBridge(QObject):
 
     @Slot()
     def refreshDevices(self) -> None:
-        if self.busy:
+        if self.busy or self.modelLoading:
             return
         self._refresh_devices(emit=True, refresh=True)
 
@@ -351,7 +359,7 @@ class QmlBridge(QObject):
 
     @Slot()
     def startOcr(self) -> None:
-        if self.busy:
+        if self.busy or self.modelLoading:
             return
         if not self._image_path or not self._image_path.exists():
             QMessageBox.information(
@@ -375,6 +383,12 @@ class QmlBridge(QObject):
 
     @Slot()
     def stopOcr(self) -> None:
+        if self.modelLoading:
+            self._controller.cancel_model_loading()
+            self._set_ocr_status("draining")
+            self._set_batch_status("draining")
+            self.stateChanged.emit()
+            return
         if self._operation != OP_OCR:
             return
         self._controller.cancel_ocr()
@@ -455,7 +469,7 @@ class QmlBridge(QObject):
 
     @Slot()
     def startBatch(self) -> None:
-        if self.busy:
+        if self.busy or self.modelLoading:
             return
         if not self._batch_paths:
             QMessageBox.information(
@@ -484,6 +498,12 @@ class QmlBridge(QObject):
 
     @Slot()
     def stopBatch(self) -> None:
+        if self.modelLoading:
+            self._controller.cancel_model_loading()
+            self._set_ocr_status("draining")
+            self._set_batch_status("draining")
+            self.stateChanged.emit()
+            return
         if self._operation != OP_BATCH:
             return
         self._controller.cancel_active_batch()
@@ -646,8 +666,6 @@ class QmlBridge(QObject):
         self._set_ocr_status("idle")
         self._set_batch_status("idle")
         self.stateChanged.emit()
-        # Nessun auto-start: cambiare device non deve lanciare OCR per un
-        # file precedentemente selezionato.
 
     @Slot()
     def _on_model_load_cancelled(self) -> None:

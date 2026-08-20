@@ -180,15 +180,31 @@ class AppController:
         """Rileva l'hardware e richiede il caricamento iniziale del modello."""
         if self._initialized:
             return
+
         devices = self._hardware_detector.detect()
         default_device = self._settings.default_device
-        if not any(
+        configured_available = any(
             device.device_type == default_device and device.available
             for device in devices
-        ):
-            default_device = self._hardware_detector.get_default().device_type
-            self._settings = self._settings.with_(default_device=default_device)
-            self._settings.save()
+        )
+
+        if not configured_available:
+            fallback = self._hardware_detector.get_default()
+            if fallback.available:
+                default_device = fallback.device_type
+                self._settings = self._settings.with_(default_device=default_device)
+                self._settings.save()
+            else:
+                # Nessun backend è realmente utilizzabile: non trasformare una
+                # preferenza valida (es. llama-cpp-sycl) in un altro device che
+                # è comunque indisponibile. Il model-load produrrà l'errore
+                # corretto per il device configurato e, dopo l'installazione del
+                # backend, la preferenza dell'utente resterà intatta.
+                logger.warning(
+                    "Nessun backend llama.cpp disponibile; mantengo device configurato=%s",
+                    default_device,
+                )
+
         self._initialized = True
         self._prepare_model_load(default_device)
 

@@ -73,6 +73,23 @@ class FakeDetector:
         return self.devices[0]
 
 
+class FakeUnavailableDetector:
+    def __init__(self) -> None:
+        self.devices = [
+            HardwareInfo(
+                device_name="llama.cpp non disponibile",
+                device_type="llama-cpp",
+                available=False,
+            )
+        ]
+
+    def detect(self, *, refresh: bool = False):
+        return list(self.devices)
+
+    def get_default(self):
+        return self.devices[0]
+
+
 def _controller_with_fake_engine(monkeypatch) -> tuple[AppController, FakeEngine]:
     monkeypatch.setattr(Settings, "save", lambda self: None)
     controller = AppController(Settings(default_device="llama-cpp"))
@@ -125,4 +142,22 @@ def test_cancelled_model_load_releases_operation(monkeypatch) -> None:
 
     assert controller.operation == OP_IDLE
     assert engine.initialize_calls == ["llama-cpp-sycl"]
+    controller.shutdown()
+
+
+def test_initialize_preserves_configured_device_if_nothing_is_available(monkeypatch) -> None:
+    saved: list[str] = []
+    monkeypatch.setattr(
+        Settings,
+        "save",
+        lambda self: saved.append(self.default_device),
+    )
+    controller = AppController(Settings(default_device="llama-cpp-sycl"))
+    controller._hardware_detector = FakeUnavailableDetector()  # type: ignore[attr-defined]
+
+    controller.initialize()
+
+    assert controller.settings.default_device == "llama-cpp-sycl"
+    assert controller.operation == OP_MODEL_LOADING
+    assert saved == []
     controller.shutdown()

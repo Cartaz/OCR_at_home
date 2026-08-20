@@ -1,4 +1,4 @@
-"""Motore OCR thread-safe basato su llama.cpp."""
+"""Motore OCR thread-safe basato esclusivamente su llama.cpp + SYCL."""
 
 from __future__ import annotations
 
@@ -19,13 +19,12 @@ from core.models import OCRResult
 
 logger = logging.getLogger(__name__)
 
-BACKEND_LLAMA_CPP = OCRDefaults.LLAMA_CPP_DEVICE
 BACKEND_LLAMA_CPP_SYCL = OCRDefaults.LLAMA_CPP_SYCL_DEVICE
-_SUPPORTED_BACKENDS = {BACKEND_LLAMA_CPP, BACKEND_LLAMA_CPP_SYCL}
+_SUPPORTED_BACKENDS = {BACKEND_LLAMA_CPP_SYCL}
 
 
 class OCREngine:
-    """Gestisce lifecycle e accesso esclusivo al backend llama-server."""
+    """Gestisce lifecycle e accesso esclusivo al backend SYCL."""
 
     def __init__(self) -> None:
         self._initialized = False
@@ -58,8 +57,8 @@ class OCREngine:
     ) -> None:
         if device not in _SUPPORTED_BACKENDS:
             raise ModelLoadError(
-                "llama-cpp",
-                f"Backend non supportato: {device}",
+                "llama-server",
+                f"Backend non supportato: {device}. GLM OCR è configurato SYCL-only.",
             )
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
@@ -70,28 +69,22 @@ class OCREngine:
             if self._llama_backend is not None:
                 self._shutdown_backend_locked()
 
-            self._device = device
-            self._backend = (
-                BACKEND_LLAMA_CPP_SYCL
-                if device == BACKEND_LLAMA_CPP_SYCL
-                else BACKEND_LLAMA_CPP
-            )
+            self._device = AppConstants.LLAMA_CPP_SYCL_DEVICE
+            self._backend = BACKEND_LLAMA_CPP_SYCL
 
             backend: Any = None
             try:
                 from core.llama_backend import LlamaServerBackend
 
-                backend = LlamaServerBackend(preferred_device=device)
+                backend = LlamaServerBackend(
+                    preferred_device=AppConstants.LLAMA_CPP_SYCL_DEVICE
+                )
                 backend.initialize(cancel_token=cancel_token)
                 if cancel_token is not None:
                     cancel_token.raise_if_cancelled()
-                # Pubblicare il backend solo dopo startup e cancellation check.
                 self._llama_backend = backend
                 self._initialized = True
             except Exception as exc:
-                # Se la cancellazione/failure avviene dopo che il processo è
-                # partito ma prima della pubblicazione, il backend locale deve
-                # comunque essere chiuso: altrimenti resta un llama-server orfano.
                 if backend is not None:
                     try:
                         backend.shutdown()
@@ -102,8 +95,8 @@ class OCREngine:
                 if isinstance(exc, (ModelLoadError, OperationCancelledError)):
                     raise
                 raise ModelLoadError(
-                    "llama-cpp",
-                    f"Impossibile inizializzare il backend llama.cpp: {exc}",
+                    "llama-server",
+                    f"Impossibile inizializzare il backend SYCL: {exc}",
                 ) from exc
 
     def process_image(
@@ -135,8 +128,6 @@ class OCREngine:
             self._inference_lock.release()
 
     def shutdown(self) -> None:
-        # Blocca finché un'eventuale inferenza non ha restituito il controllo.
-        # AppController cancella prima il token così l'I/O HTTP viene interrotto.
         with self._inference_lock:
             with self._lifecycle_lock:
                 self._shutdown_backend_locked()
@@ -151,4 +142,4 @@ class OCREngine:
         try:
             backend.shutdown()
         except Exception as exc:
-            logger.warning("Errore arresto backend llama.cpp: %s", exc)
+            logger.warning("Errore arresto backend llama.cpp SYCL: %s", exc)

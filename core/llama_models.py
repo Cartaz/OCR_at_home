@@ -1,12 +1,4 @@
-# core/llama_models.py
-"""Gestione download modelli GGUF per llama.cpp.
-
-Scarica e verifica la disponibilità dei modelli GGUF (GLM-OCR Q8_0
-+ mmproj) nella directory di cache, usando huggingface_hub.
-
-Functions:
-    ensure_gguf_models: Verifica e scarica i modelli GGUF.
-"""
+"""Gestione e validazione dei modelli GGUF."""
 
 from __future__ import annotations
 
@@ -15,80 +7,59 @@ import shutil
 from pathlib import Path
 
 from config.constants import AppConstants
+from core.cancellation import CancellationToken
 from core.event_bus import EventBus
 from core.exceptions import ModelLoadError
 
 logger = logging.getLogger(__name__)
-
-# Identificativo repository HuggingFace e nomi file
-GGUF_MODEL_ID: str = "ggml-org/GLM-OCR-GGUF"
-GGUF_MODEL_FILES: dict[str, str] = {
-    "main": "GLM-OCR-Q8_0.gguf",
-    "mmproj": "mmproj-GLM-OCR-Q8_0.gguf",
-}
-GGUF_CACHE_DIR: Path = AppConstants.GGUF_MODEL_DIR
+GGUF_MODEL_ID = "ggml-org/GLM-OCR-GGUF"
+GGUF_MODEL_FILES = {"main": "GLM-OCR-Q8_0.gguf", "mmproj": "mmproj-GLM-OCR-Q8_0.gguf"}
+GGUF_CACHE_DIR = AppConstants.GGUF_MODEL_DIR
+_MIN_MODEL_SIZE = {"main": 100 * 1024 * 1024, "mmproj": 10 * 1024 * 1024}
 
 
-def ensure_gguf_models() -> dict[str, Path]:
-    """Verifica che i modelli GGUF siano disponibili, li scarica se necessario.
+def _is_valid_gguf(path: Path, key: str) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size < _MIN_MODEL_SIZE[key]:
+            return False
+        with path.open("rb") as handle:
+            return handle.read(4) == b"GGUF"
+    except OSError:
+        return False
 
-    Controlla la cache locale per i file modello. Se uno o più file
-    mancano, li scarica da HuggingFace usando huggingface_hub.
 
-    Returns:
-        Dict con i percorsi dei file modello {'main': Path, 'mmproj': Path}.
-
-    Raises:
-        ModelLoadError: Se i modelli non possono essere scaricati.
-    """
+def ensure_gguf_models(cancel_token: CancellationToken | None = None) -> dict[str, Path]:
     GGUF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-    model_paths: dict[str, Path] = {}
-    need_download = False
-
-    for key, filename in GGUF_MODEL_FILES.items():
-        path = GGUF_CACHE_DIR / filename
-        model_paths[key] = path
-        if not path.exists():
-            logger.info("Modello GGUF mancante: %s", filename)
-            need_download = True
-
-    if not need_download:
-        logger.info("Modelli GGUF trovati nella cache: %s", GGUF_CACHE_DIR)
+    model_paths = {key: GGUF_CACHE_DIR / filename for key, filename in GGUF_MODEL_FILES.items()}
+    for key, path in model_paths.items():
+        if path.exists() and not _is_valid_gguf(path, key):
+            logger.warning("GGUF incompleto/corrotto, riscarico: %s", path)
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise ModelLoadError(GGUF_MODEL_ID, f"Impossibile rimuovere {path}: {exc}") from exc
+    if all(_is_valid_gguf(path, key) for key, path in model_paths.items()):
         return model_paths
 
-    # Scarica i modelli mancanti
-    logger.info("Download modelli GGUF da HuggingFace...")
-    EventBus.emit("model_load_progress", {
-        "message": "Download modelli GGUF (primo avvio)...",
-    })
-
+    EventBus.emit("model_load_progress", {"message": "Download modelli GGUF (primo avvio)..."})
     try:
         from huggingface_hub import hf_hub_download
         for key, filename in GGUF_MODEL_FILES.items():
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
             path = model_paths[key]
-            if path.exists():
+            if _is_valid_gguf(path, key):
                 continue
-            logger.info("Scaricamento %s...", filename)
-            EventBus.emit("model_load_progress", {
-                "message": f"Scaricamento {filename}...",
-            })
-            downloaded = hf_hub_download(
-                repo_id=GGUF_MODEL_ID,
-                filename=filename,
-                local_dir=str(GGUF_CACHE_DIR),
-            )
-            downloaded_path = Path(downloaded)
-            if downloaded_path != path:
-                shutil.copy2(downloaded_path, path)
-            logger.info("Scaricato: %s (%.1f MB)", filename, path.stat().st_size / 1e6)
-
+            EventBus.emit("model_load_progress", {"message": f"Scaricamento {filename}..."})
+            downloaded = Path(hf_hub_download(repo_id=GGUF_MODEL_ID, filename=filename, local_dir=str(GGUF_CACHE_DIR)))
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
+            if downloaded != path:
+                shutil.copy2(downloaded, path)
+            if not _is_valid_gguf(path, key):
+                raise ModelLoadError(GGUF_MODEL_ID, f"File GGUF non valido: {filename}")
+    except ModelLoadError:
+        raise
     except Exception as exc:
-        raise ModelLoadError(
-            GGUF_MODEL_ID,
-            f"Impossibile scaricare i modelli GGUF: {exc}. "
-            f"Verifica la connessione internet o scarica manualmente da "
-            f"https://huggingface.co/{GGUF_MODEL_ID}",
-        ) from exc
-
+        raise ModelLoadError(GGUF_MODEL_ID, f"Impossibile scaricare i modelli GGUF: {exc}") from exc
     return model_paths

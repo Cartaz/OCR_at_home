@@ -1,15 +1,4 @@
-# core/app_controller.py
-"""Controller principale dell'applicazione GLM OCR.
-
-Orchestra l'interazione tra il motore OCR, il gestore processi,
-il rilevatore hardware e le impostazioni. Espone l'interfaccia
-pubblica per il livello UI e comunica i cambiamenti di stato
-esclusivamente tramite l'EventBus.
-
-CRITICO: Questo modulo NON importa da PySide6, PyQt6 o qualsiasi
-altro modulo Qt. Usa threading.Thread per l'OCR asincrono e
-EventBus per la comunicazione con la UI.
-"""
+"""Controller centrale e coordinatore delle operazioni di GLM OCR."""
 
 from __future__ import annotations
 
@@ -20,248 +9,217 @@ from pathlib import Path
 from typing import Callable
 
 from config.settings import Settings
+from core.cancellation import CancellationToken
 from core.event_bus import EventBus
-from core.exceptions import OCREngineNotInitializedError
+from core.exceptions import OCREngineNotInitializedError, OperationBusyError, OperationCancelledError
 from core.hardware_detector import HardwareDetector
 from core.models import BatchOCRJob, HardwareInfo, OCRResult
 from core.ocr_engine import OCREngine
 from core.process_manager import ProcessManager
 
 logger = logging.getLogger(__name__)
+OP_IDLE = "idle"
+OP_MODEL_LOADING = "model_loading"
+OP_OCR = "ocr"
+OP_BATCH = "batch"
+OP_SHUTTING_DOWN = "shutting_down"
 
 
 class _OCRWorker:
-    """Worker per l'esecuzione asincrona dell'OCR su singola immagine.
-
-    Esegue l'OCR in un thread daemon e comunica i risultati tramite
-    EventBus anziché segnali Qt.
-    """
-
-    def __init__(self, engine: OCREngine, image_path: Path, task_id: str) -> None:
+    def __init__(self, engine: OCREngine, image_path: Path, task_id: str, token: CancellationToken, preprocessing_enabled: bool, on_finished: Callable[[], None]) -> None:
         self._engine = engine
         self._image_path = image_path
         self._task_id = task_id
+        self._token = token
+        self._preprocessing_enabled = preprocessing_enabled
+        self._on_finished = on_finished
 
     def run(self) -> None:
-        """Esegue l'OCR e emette eventi tramite EventBus."""
+        from core.image_utils import is_pdf
+        is_pdf_file = is_pdf(self._image_path)
+        EventBus.emit("ocr_started", {"mode": "single", "task_id": self._task_id, "is_pdf": is_pdf_file})
         try:
-            result = self._engine.process_image(self._image_path)
-            # process_image already emits ocr_started and ocr_completed
-            logger.info(
-                "OCR completato per %s (%.1f ms)",
-                self._image_path.name, result.processing_time_ms,
-            )
+            result = self._engine.process_image(self._image_path, mode="single", cancel_token=self._token, preprocessing_enabled=self._preprocessing_enabled)
+            self._token.raise_if_cancelled()
+            EventBus.emit("ocr_completed", {"mode": "single", "task_id": self._task_id, "text": "" if is_pdf_file else result.text, "confidence": result.confidence, "time_ms": result.processing_time_ms, "is_pdf": is_pdf_file, "pages_streamed": is_pdf_file})
+        except OperationCancelledError:
+            EventBus.emit("ocr_cancelled", {"mode": "single", "task_id": self._task_id})
         except Exception as exc:
             logger.error("OCR fallito per %s: %s", self._image_path, exc)
-            EventBus.emit("ocr_failed", {
-                "task_id": self._task_id, "error": str(exc),
-            })
+            EventBus.emit("ocr_failed", {"mode": "single", "task_id": self._task_id, "error": str(exc)})
+        finally:
+            self._on_finished()
 
 
 class AppController:
-    """Controller principale che coordina tutti i moduli dell'applicazione.
-
-    Qt-free: usa threading.Thread + EventBus per comunicazione UI.
-
-    Eventi: model_loading, config_changed, ocr_started, ocr_completed,
-    ocr_failed.
-    """
-
     def __init__(self, settings: Settings) -> None:
-        """Inizializza il controller con le impostazioni utente."""
-        self._settings: Settings = settings
-        self._engine: OCREngine = OCREngine()
-        self._process_manager: ProcessManager = ProcessManager(self._engine)
-        self._hardware_detector: HardwareDetector = HardwareDetector()
-        self._initialized: bool = False
+        self._settings = settings
+        self._engine = OCREngine()
+        self._hardware_detector = HardwareDetector()
+        self._operation_lock = threading.RLock()
+        self._operation = OP_IDLE
+        self._initialized = False
+        self._shutdown_started = False
         self._ocr_thread: threading.Thread | None = None
-
-    # --- Proprietà ---
-
-    @property
-    def settings(self) -> Settings:
-        """Impostazioni correnti dell'applicazione."""
-        return self._settings
+        self._ocr_token: CancellationToken | None = None
+        self._model_load_token: CancellationToken | None = None
+        self._process_manager = ProcessManager(self._engine, on_job_finished=self._on_batch_finished)
 
     @property
-    def engine(self) -> OCREngine:
-        """Motore OCR utilizzato per l'elaborazione."""
-        return self._engine
-
+    def settings(self) -> Settings: return self._settings
     @property
-    def hardware_detector(self) -> HardwareDetector:
-        """Rilevatore di dispositivi hardware."""
-        return self._hardware_detector
-
+    def engine(self) -> OCREngine: return self._engine
     @property
-    def process_manager(self) -> ProcessManager:
-        """Gestore dei processi batch."""
-        return self._process_manager
-
+    def hardware_detector(self) -> HardwareDetector: return self._hardware_detector
     @property
-    def is_model_loading(self) -> bool:
-        """Indica se il caricamento del modello è in corso."""
-        return False  # Model loading is handled by EventBridge QThread
+    def process_manager(self) -> ProcessManager: return self._process_manager
+    @property
+    def operation(self) -> str:
+        with self._operation_lock: return self._operation
+    @property
+    def is_busy(self) -> bool: return self.operation != OP_IDLE
+    @property
+    def is_model_loading(self) -> bool: return self.operation == OP_MODEL_LOADING
 
-    # --- Inizializzazione ---
+    def _begin_operation(self, operation: str) -> None:
+        with self._operation_lock:
+            if self._operation != OP_IDLE:
+                raise OperationBusyError(self._operation)
+            self._operation = operation
+        EventBus.emit("operation_changed", {"operation": operation})
+
+    def _finish_operation(self, operation: str) -> None:
+        with self._operation_lock:
+            if self._operation != operation: return
+            self._operation = OP_IDLE
+        EventBus.emit("operation_changed", {"operation": OP_IDLE})
+
+    def _prepare_model_load(self, device: str) -> None:
+        self._begin_operation(OP_MODEL_LOADING)
+        token = CancellationToken()
+        with self._operation_lock: self._model_load_token = token
+        EventBus.emit("model_loading", {"device": device})
 
     def initialize(self) -> None:
-        """Rileva hardware e determina il dispositivo di default.
-
-        Non avvia il caricamento del modello — quello è delegato al
-        livello UI tramite EventBridge.start_model_loading().
-        """
-        logger.info("Inizializzazione controller applicazione...")
+        if self._initialized: return
         devices = self._hardware_detector.detect()
-        default_device: str = self._settings.default_device
-        if not any(
-            d.device_type == default_device and d.available for d in devices
-        ):
-            fallback = self._hardware_detector.get_default()
-            default_device = fallback.device_type
-            logger.info(
-                "Dispositivo di default non disponibile, fallback a %s",
-                default_device,
-            )
+        default_device = self._settings.default_device
+        if not any(d.device_type == default_device and d.available for d in devices):
+            default_device = self._hardware_detector.get_default().device_type
         self._initialized = True
-        logger.info("Controller applicazione inizializzato.")
-        # Notifica la UI che il modello deve essere caricato.
-        # Il layer UI (EventBridge) avvierà il QThread.
-        EventBus.emit("model_loading", {"device": default_device})
+        self._prepare_model_load(default_device)
 
-    # --- Caricamento modello (sincrono, chiamato dal QThread worker) ---
+    def request_model_load(self, device: str) -> None: self._prepare_model_load(device)
+
+    def cancel_model_loading(self) -> None:
+        with self._operation_lock: token = self._model_load_token
+        if token is not None: token.cancel()
 
     def load_model_sync(self, device: str) -> None:
-        """Carica il modello OCR in modo sincrono.
-
-        Questo metodo è progettato per essere chiamato dal ModelLoadWorker
-        nel QThread di EventBridge. NON crea thread propri.
-
-        Args:
-            device: Dispositivo di inferenza (GPU/NPU/CPU).
-        """
-        self._engine.initialize(device=device)
-
-    # --- API pubblica ---
+        with self._operation_lock:
+            token = self._model_load_token
+            active = self._operation
+        if active == OP_IDLE:
+            self._begin_operation(OP_MODEL_LOADING)
+            token = CancellationToken()
+            with self._operation_lock: self._model_load_token = token
+        elif active != OP_MODEL_LOADING:
+            raise OperationBusyError(active)
+        assert token is not None
+        try:
+            self._engine.initialize(device=device, cancel_token=token)
+            token.raise_if_cancelled()
+        finally:
+            with self._operation_lock:
+                if self._model_load_token is token: self._model_load_token = None
+            self._finish_operation(OP_MODEL_LOADING)
 
     def run_ocr(self, image_path: Path) -> OCRResult:
-        """Esegue l'OCR su una singola immagine (sincrono, per testing).
-
-        Args:
-            image_path: Percorso del file immagine da elaborare.
-
-        Returns:
-            OCRResult con testo estratto e metadati.
-
-        Raises:
-            OCREngineNotInitializedError: Se il motore non è inizializzato.
-        """
-        if not self._engine.is_initialized:
-            raise OCREngineNotInitializedError()
-        return self._engine.process_image(image_path)
+        if not self._engine.is_initialized: raise OCREngineNotInitializedError()
+        self._begin_operation(OP_OCR)
+        token = CancellationToken()
+        try:
+            return self._engine.process_image(image_path, mode="single", cancel_token=token, preprocessing_enabled=self._settings.preprocessing_enabled)
+        finally:
+            self._finish_operation(OP_OCR)
 
     def start_ocr(self, image_path: Path) -> None:
-        """Avvia l'OCR su una singola immagine in un thread background.
-
-        I risultati vengono comunicati tramite EventBus:
-        - ocr_started: elaborazione iniziata
-        - ocr_completed: elaborazione completata con testo
-        - ocr_failed: elaborazione fallita con errore
-
-        Args:
-            image_path: Percorso del file immagine da elaborare.
-
-        Raises:
-            OCREngineNotInitializedError: Se il motore non è inizializzato.
-        """
-        if not self._engine.is_initialized:
-            raise OCREngineNotInitializedError()
+        if not self._engine.is_initialized: raise OCREngineNotInitializedError()
+        self._begin_operation(OP_OCR)
+        token = CancellationToken()
         task_id = image_path.stem + "-" + uuid.uuid4().hex[:6]
-        worker = _OCRWorker(self._engine, image_path, task_id)
-        self._ocr_thread = threading.Thread(
-            target=worker.run,
-            name=f"ocr-worker-{task_id}",
-            daemon=True,
-        )
-        self._ocr_thread.start()
-        logger.info("Thread OCR avviato per: %s", image_path.name)
+        def finished() -> None:
+            with self._operation_lock:
+                if self._ocr_token is token: self._ocr_token = None
+            self._finish_operation(OP_OCR)
+        worker = _OCRWorker(self._engine, Path(image_path), task_id, token, self._settings.preprocessing_enabled, finished)
+        thread = threading.Thread(target=worker.run, name=f"ocr-worker-{task_id}", daemon=True)
+        with self._operation_lock:
+            self._ocr_token = token
+            self._ocr_thread = thread
+        try: thread.start()
+        except Exception:
+            with self._operation_lock:
+                self._ocr_token = None; self._ocr_thread = None
+            self._finish_operation(OP_OCR)
+            raise
+
+    def cancel_ocr(self) -> None:
+        with self._operation_lock:
+            if self._operation != OP_OCR: return
+            token = self._ocr_token
+        if token is not None: token.cancel()
 
     def run_batch(self, image_paths: list[Path]) -> BatchOCRJob:
-        """Esegue l'OCR su un batch di immagini.
+        if not self._engine.is_initialized: raise OCREngineNotInitializedError()
+        self._begin_operation(OP_BATCH)
+        try:
+            return self._process_manager.submit_batch(image_paths, preprocessing_enabled=self._settings.preprocessing_enabled)
+        except Exception:
+            self._finish_operation(OP_BATCH)
+            raise
 
-        Args:
-            image_paths: Lista dei percorsi delle immagini.
-
-        Returns:
-            BatchOCRJob con i task creati per ogni immagine.
-
-        Raises:
-            OCREngineNotInitializedError: Se il motore non è inizializzato.
-        """
-        if not self._engine.is_initialized:
-            raise OCREngineNotInitializedError()
-        return self._process_manager.submit_batch(image_paths)
-
-    def cancel_batch(self, job_id: str) -> None:
-        """Annulla un job batch in esecuzione.
-
-        Args:
-            job_id: Identificativo del job da annullare.
-        """
-        self._process_manager.cancel_batch(job_id)
-
-    def cancel_active_batch(self) -> None:
-        """Annulla il job batch attualmente in esecuzione, se presente."""
-        self._process_manager.cancel_active_batch()
-
-    def get_available_devices(self) -> list[HardwareInfo]:
-        """Elenca i dispositivi di inferenza disponibili.
-
-        Returns:
-            Lista di HardwareInfo per ogni dispositivo rilevato.
-        """
-        return self._hardware_detector.detect()
+    def _on_batch_finished(self, _job_id: str) -> None: self._finish_operation(OP_BATCH)
+    def cancel_batch(self, job_id: str) -> None: self._process_manager.cancel_batch(job_id)
+    def cancel_active_batch(self) -> None: self._process_manager.cancel_active_batch()
+    def get_available_devices(self, *, refresh: bool = False) -> list[HardwareInfo]: return self._hardware_detector.detect(refresh=refresh)
 
     def switch_device(self, device_type: str) -> None:
-        """Cambia il dispositivo di inferenza e ricarica il modello.
-
-        Args:
-            device_type: Tipo di dispositivo target (GPU/NPU/CPU).
-        """
-        logger.info(
-            "Cambio dispositivo di inferenza: %s → %s",
-            self._engine.device, device_type,
-        )
-        self._engine.shutdown()
-        self._settings = self._settings.with_(default_device=device_type)
-        self._settings.save()
-        EventBus.emit("config_changed", {"default_device": device_type})
-        # Notifica la UI per ricaricare il modello via EventBridge QThread
-        EventBus.emit("model_loading", {"device": device_type})
+        self._begin_operation(OP_MODEL_LOADING)
+        token = CancellationToken()
+        with self._operation_lock: self._model_load_token = token
+        try:
+            self._engine.shutdown()
+            self._settings = self._settings.with_(default_device=device_type)
+            self._settings.save()
+            EventBus.emit("config_changed", {"default_device": device_type})
+            EventBus.emit("model_loading", {"device": device_type})
+        except Exception:
+            with self._operation_lock:
+                if self._model_load_token is token: self._model_load_token = None
+            self._finish_operation(OP_MODEL_LOADING)
+            raise
 
     def update_settings(self, **overrides: object) -> None:
-        """Aggiorna le impostazioni con gli override forniti.
-
-        Args:
-            **overrides: Campi da sostituire e loro nuovi valori.
-        """
         self._settings = self._settings.with_(**overrides)
         self._settings.save()
         EventBus.emit("config_changed", overrides)
-        logger.debug("Impostazioni aggiornate: %s", overrides)
 
     def shutdown(self) -> None:
-        """Arresta il controller e rilascia tutte le risorse."""
+        with self._operation_lock:
+            if self._shutdown_started: return
+            self._shutdown_started = True
+            self._operation = OP_SHUTTING_DOWN
+            ocr_token = self._ocr_token
+            model_token = self._model_load_token
+        EventBus.emit("operation_changed", {"operation": OP_SHUTTING_DOWN})
+        if ocr_token is not None: ocr_token.cancel()
+        if model_token is not None: model_token.cancel()
+        self._process_manager.cancel_active_batch()
         self._process_manager.shutdown()
+        thread = self._ocr_thread
+        if thread is not None and thread.is_alive(): thread.join(timeout=15)
         self._engine.shutdown()
         self._initialized = False
-        logger.info("Controller applicazione arrestato.")
 
-    def subscribe(self, event: str, handler: Callable) -> None:
-        """Sottoscrive un handler per un evento tramite EventBus.
-
-        Args:
-            event: Nome dell'evento (es. 'model_loaded').
-            handler: Funzione callback da invocare.
-        """
-        EventBus.subscribe(event, handler)
+    def subscribe(self, event: str, handler: Callable) -> None: EventBus.subscribe(event, handler)

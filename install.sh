@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installazione locale di GLM OCR per CachyOS/Arch Linux.
+# Installazione locale SYCL-only di GLM OCR per CachyOS/Arch Linux.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,8 +8,6 @@ CACHE_DIR="$SCRIPT_DIR/.cache"
 LLAMA_SRC="$CACHE_DIR/llama.cpp"
 LLAMA_BUILD="$LLAMA_SRC/build-glm-ocr-sycl"
 LLAMA_CPP_REPO="https://github.com/ggml-org/llama.cpp.git"
-# Snapshot fissato per riproducibilità il 2026-08-20. Aggiornare il pin
-# intenzionalmente dopo test, non tramite un git pull implicito.
 LLAMA_CPP_COMMIT="07822bddf80d73f1168e592c52e69caaff820f9c"
 APP_ID="com.glm-ocr.app"
 
@@ -46,15 +44,21 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
-venv_llama_works() {
+venv_llama_sycl_works() {
     [[ -x "$VENV_DIR/bin/llama-server" ]] || return 1
-    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$VENV_DIR/bin/llama-server" --version >/dev/null 2>&1
+    local output
+    if ! output="$(
+        LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$VENV_DIR/bin/llama-server" --list-devices 2>&1
+    )"; then
+        return 1
+    fi
+    grep -Eiq '(^|[[:space:]])SYCL[0-9]+[[:space:]]*:' <<<"$output"
 }
 
 build_sycl_llama() {
     if [[ ! -f /opt/intel/oneapi/setvars.sh ]]; then
-        warn "Intel oneAPI non trovato: salto la build SYCL locale."
+        warn "Intel oneAPI non trovato: impossibile costruire il backend SYCL."
         return 1
     fi
 
@@ -81,9 +85,8 @@ build_sycl_llama() {
     jobs="$(( ($(nproc) + 1) / 2 ))"
     (( jobs < 1 )) && jobs=1
 
-    # Gli script oneAPI non sono compatibili con `set -u`: alcune versioni
-    # leggono variabili opzionali (es. OCL_ICD_FILENAMES) prima di definirle.
-    # Manteniamo errexit/pipefail nel sottoprocesso, ma non nounset.
+    # Gli script oneAPI usano variabili opzionali non sempre definite: non
+    # abilitiamo nounset nel sottoprocesso che esegue setvars.sh.
     if ! bash -c "
         set -eo pipefail
         export OCL_ICD_FILENAMES=\"\${OCL_ICD_FILENAMES:-}\"
@@ -109,7 +112,6 @@ build_sycl_llama() {
     mkdir -p "$VENV_DIR/bin" "$VENV_DIR/lib"
     install -m755 "$server" "$VENV_DIR/bin/llama-server"
 
-    # Mantiene file e symlink SONAME prodotti dalla build shared.
     local copied=0
     local library
     shopt -s nullglob
@@ -123,33 +125,33 @@ build_sycl_llama() {
     done
     shopt -u nullglob
     if [[ "$copied" -eq 0 ]]; then
-        warn "Nessuna libreria condivisa llama.cpp copiata; verifica la build."
-    fi
-
-    if ! venv_llama_works; then
-        warn "llama-server compilato ma non eseguibile con le librerie installate."
+        warn "Nessuna libreria condivisa llama.cpp copiata."
         return 1
     fi
 
-    # --list-devices è l'interfaccia upstream usata anche dall'app per
-    # verificare che il backend compilato esponga davvero una GPU SYCL.
-    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$VENV_DIR/bin/llama-server" --list-devices || true
+    if ! venv_llama_sycl_works; then
+        warn "llama-server è stato compilato ma non espone alcun device SYCL."
+        return 1
+    fi
 
+    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$VENV_DIR/bin/llama-server" --list-devices
     log "llama-server SYCL installato nel venv"
-    return 0
 }
 
 if ! build_sycl_llama; then
-    if venv_llama_works; then
-        warn "La nuova build SYCL è fallita: mantengo il llama-server già presente nel venv."
-    elif command -v llama-server >/dev/null 2>&1; then
-        log "Uso il llama-server di sistema: $(command -v llama-server)"
+    if venv_llama_sycl_works; then
+        warn "La nuova build è fallita: mantengo il precedente llama-server SYCL verificato."
     else
-        warn "Installazione incompleta: nessun llama-server eseguibile disponibile."
-        warn "Verifica oneAPI/CMake oppure installa 'llama-cpp' e rilancia install.sh."
+        warn "Installazione interrotta: nessun llama-server SYCL funzionante disponibile."
+        warn "CPU e Vulkan non sono fallback consentiti da GLM OCR."
         exit 1
     fi
+fi
+
+if ! venv_llama_sycl_works; then
+    warn "Verifica finale fallita: il venv non espone un device SYCL."
+    exit 1
 fi
 
 log "Verifica/download modelli GGUF"
@@ -169,7 +171,7 @@ cat > "$DESKTOP_DIR/$APP_ID.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=GLM OCR
-Comment=Riconoscimento ottico locale con GLM-OCR e llama.cpp
+Comment=Riconoscimento ottico locale con GLM-OCR e llama.cpp SYCL
 Exec=$VENV_DIR/bin/python $SCRIPT_DIR/main.py
 Icon=glm-ocr
 Terminal=false
@@ -183,6 +185,6 @@ fi
 command -v update-desktop-database >/dev/null 2>&1 && \
     update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
-log "Installazione completata"
+log "Installazione SYCL completata"
 printf 'Avvio:\n  %q %q\n' "$VENV_DIR/bin/python" "$SCRIPT_DIR/main.py"
 printf 'llama.cpp pin:\n  %s\n' "$LLAMA_CPP_COMMIT"

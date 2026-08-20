@@ -1,9 +1,4 @@
-# ui/qml_bridge.py
-"""Bridge Python ↔ QML per GLM OCR.
-
-Mantiene il backend e l'EventBridge esistenti e presenta a QML solo proprietà
-e slot UI. Nessuna logica OCR viene duplicata nel frontend.
-"""
+"""Bridge Python ↔ QML: stato UI senza duplicare la logica core."""
 
 from __future__ import annotations
 
@@ -14,9 +9,14 @@ from PySide6.QtCore import QObject, Property, QUrl, Signal, Slot
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from config.constants import AppMeta
-from core.app_controller import AppController
+from core.app_controller import (
+    OP_BATCH,
+    OP_IDLE,
+    OP_MODEL_LOADING,
+    OP_OCR,
+    AppController,
+)
 from ui.event_bridge import EventBridge
-
 
 _LANGUAGES: tuple[tuple[str, str], ...] = (
     ("ita+eng", "Italiano + Inglese"),
@@ -36,7 +36,7 @@ _STATUS_LABELS = {
     "loading_model": "Caricamento modello...",
     "stopped": "Arrestato",
     "completed": "Completato",
-    "draining": "Completamento...",
+    "draining": "Arresto in corso...",
 }
 
 _STATUS_COLORS = {
@@ -53,7 +53,7 @@ _STATUS_COLORS = {
 
 
 class QmlBridge(QObject):
-    """Stato UI e adattatore comportamentale per il frontend QML."""
+    """Espone a QML un'unica vista coerente dello stato applicativo."""
 
     stateChanged = Signal()
 
@@ -63,6 +63,7 @@ class QmlBridge(QObject):
         self._event_bridge = EventBridge(controller)
         self._window: Any | None = None
         self._shutting_down = False
+        self._operation = controller.operation
 
         self._language = controller.settings.language
         self._preprocessing = controller.settings.preprocessing_enabled
@@ -74,22 +75,20 @@ class QmlBridge(QObject):
         self._ocr_status_text = "Pronto"
         self._ocr_status_color = _STATUS_COLORS["idle"]
         self._ocr_page_progress = ""
-        self._ocr_running = False
 
         self._batch_paths: list[Path] = []
         self._batch_text = ""
         self._batch_status_text = "Pronto"
         self._batch_status_color = _STATUS_COLORS["idle"]
-        self._batch_running = False
         self._batch_progress_text = ""
         self._batch_completed_count = 0
         self._batch_total_count = 0
 
         self._connect_events()
-        self._refresh_devices(emit=False)
+        self._refresh_devices(emit=False, refresh=False)
 
     # ------------------------------------------------------------------
-    # Window / application
+    # Window / lifecycle
     # ------------------------------------------------------------------
 
     def set_window(self, window: Any) -> None:
@@ -102,9 +101,6 @@ class QmlBridge(QObject):
         self._window.show()
         try:
             self._window.raise_()
-        except (AttributeError, RuntimeError):
-            pass
-        try:
             self._window.requestActivate()
         except (AttributeError, RuntimeError):
             pass
@@ -125,14 +121,21 @@ class QmlBridge(QObject):
         if app is not None:
             app.quit()
 
+    @Slot()
+    def shutdown(self) -> None:
+        self._shutdown_controller()
+
     def _shutdown_controller(self) -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
-        self._controller.shutdown()
+        try:
+            self._controller.shutdown()
+        finally:
+            self._event_bridge.shutdown()
 
     # ------------------------------------------------------------------
-    # Properties exposed to QML
+    # Proprietà globali
     # ------------------------------------------------------------------
 
     @Property(int, constant=True)
@@ -143,27 +146,43 @@ class QmlBridge(QObject):
     def initialWindowHeight(self) -> int:
         return self._controller.settings.window_height
 
+    @Property(str, notify=stateChanged)
+    def operation(self) -> str:
+        return self._operation
+
+    @Property(bool, notify=stateChanged)
+    def busy(self) -> bool:
+        return self._operation != OP_IDLE
+
+    @Property(bool, notify=stateChanged)
+    def modelLoading(self) -> bool:
+        return self._operation == OP_MODEL_LOADING
+
     @Property("QVariantList", notify=stateChanged)
     def devices(self) -> list[dict[str, Any]]:
         return self._devices
 
     @Property(int, notify=stateChanged)
     def deviceIndex(self) -> int:
-        for i, item in enumerate(self._devices):
+        for index, item in enumerate(self._devices):
             if item["type"] == self._selected_device:
-                return i
+                return index
         return 0
 
     @Property(int, notify=stateChanged)
     def languageIndex(self) -> int:
-        for i, (code, _label) in enumerate(_LANGUAGES):
+        for index, (code, _label) in enumerate(_LANGUAGES):
             if code == self._language:
-                return i
+                return index
         return 0
 
     @Property(bool, notify=stateChanged)
     def preprocessingEnabled(self) -> bool:
         return self._preprocessing
+
+    # ------------------------------------------------------------------
+    # OCR properties
+    # ------------------------------------------------------------------
 
     @Property(str, notify=stateChanged)
     def ocrFileName(self) -> str:
@@ -191,16 +210,20 @@ class QmlBridge(QObject):
 
     @Property(bool, notify=stateChanged)
     def ocrRunning(self) -> bool:
-        return self._ocr_running
+        return self._operation == OP_OCR
+
+    # ------------------------------------------------------------------
+    # Batch properties
+    # ------------------------------------------------------------------
 
     @Property(str, notify=stateChanged)
     def batchDropText(self) -> str:
         count = len(self._batch_paths)
         if count == 0:
-            return "Trascina qui le immagini\no clicca per sfogliare"
+            return "Trascina qui immagini o PDF\no clicca per sfogliare"
         if count == 1:
-            return "1 immagine selezionata"
-        return f"{count} immagini selezionate"
+            return "1 file selezionato"
+        return f"{count} file selezionati"
 
     @Property(str, notify=stateChanged)
     def batchText(self) -> str:
@@ -226,7 +249,7 @@ class QmlBridge(QObject):
 
     @Property(bool, notify=stateChanged)
     def batchRunning(self) -> bool:
-        return self._batch_running
+        return self._operation == OP_BATCH
 
     # ------------------------------------------------------------------
     # Config
@@ -234,52 +257,66 @@ class QmlBridge(QObject):
 
     @Slot(int)
     def setLanguageIndex(self, index: int) -> None:
+        if self.busy:
+            return
         if 0 <= index < len(_LANGUAGES):
             self._language = _LANGUAGES[index][0]
+            self._controller.update_settings(language=self._language)
             self.stateChanged.emit()
 
     @Slot(bool)
     def setPreprocessing(self, enabled: bool) -> None:
-        self._preprocessing = enabled
+        if self.busy:
+            return
+        self._preprocessing = bool(enabled)
+        self._controller.update_settings(preprocessing_enabled=self._preprocessing)
         self.stateChanged.emit()
 
     @Slot(int)
     def setDeviceIndex(self, index: int) -> None:
-        if not (0 <= index < len(self._devices)):
+        if self.busy or not (0 <= index < len(self._devices)):
             return
-        device = str(self._devices[index]["type"])
+        item = self._devices[index]
+        if not bool(item.get("available", False)):
+            return
+        device = str(item["type"])
         if device == self._selected_device and self._controller.engine.is_initialized:
             return
+
+        previous = self._selected_device
         self._selected_device = device
         self.stateChanged.emit()
-        self._controller.switch_device(device)
+        try:
+            self._controller.switch_device(device)
+        except Exception as exc:
+            self._selected_device = previous
+            self._set_ocr_error(str(exc))
+            self._set_batch_error(str(exc))
+            self.stateChanged.emit()
 
     @Slot()
     def refreshDevices(self) -> None:
-        self._refresh_devices(emit=True)
+        if self.busy:
+            return
+        self._refresh_devices(emit=True, refresh=True)
 
-    def _refresh_devices(self, *, emit: bool) -> None:
-        devices = self._controller.get_available_devices()
+    def _refresh_devices(self, *, emit: bool, refresh: bool) -> None:
+        devices = self._controller.get_available_devices(refresh=refresh)
         devices = sorted(
             devices,
-            key=lambda d: (
-                0 if d.device_type == "llama-cpp-sycl" else
-                1 if d.device_type == "llama-cpp" else
-                2 if d.device_type == "GPU" else
-                3 if d.device_type == "NPU" else
-                4
+            key=lambda device: (
+                0 if device.device_type == "llama-cpp-sycl" else
+                1 if device.device_type == "llama-cpp" else 2
             ),
         )
-
         self._devices = [
             {
-                "type": d.device_type,
-                "label": d.device_name + ("" if d.available else " (non pronto)"),
-                "available": d.available,
+                "type": device.device_type,
+                "label": device.device_name + ("" if device.available else " (non pronto)"),
+                "available": device.available,
             }
-            for d in devices
+            for device in devices
         ]
-
         known = {item["type"] for item in self._devices}
         if self._selected_device not in known:
             available = next(
@@ -288,24 +325,25 @@ class QmlBridge(QObject):
             )
             if available is not None:
                 self._selected_device = str(available)
-
         if emit:
             self.stateChanged.emit()
 
     # ------------------------------------------------------------------
-    # OCR single file
+    # OCR singolo
     # ------------------------------------------------------------------
 
     @Slot()
     def chooseOcrFile(self) -> None:
+        if self.busy:
+            return
         extensions = " ".join(
             f"*{ext}" for ext in sorted(AppMeta.SUPPORTED_IMAGE_EXTENSIONS)
         )
         path, _ = QFileDialog.getOpenFileName(
             None,
-            "Seleziona immagine",
+            "Seleziona immagine o PDF",
             "",
-            f"Immagini ({extensions})",
+            f"File supportati ({extensions})",
         )
         if path:
             self._image_path = Path(path)
@@ -313,65 +351,52 @@ class QmlBridge(QObject):
 
     @Slot()
     def startOcr(self) -> None:
+        if self.busy:
+            return
         if not self._image_path or not self._image_path.exists():
             QMessageBox.information(
                 None,
                 "Nessun file",
-                "Seleziona un'immagine prima di avviare.",
+                "Seleziona un'immagine o PDF prima di avviare.",
             )
             return
-
-        self._ocr_text = ""
-        self._controller.update_settings(
-            language=self._language,
-            preprocessing_enabled=self._preprocessing,
-        )
-
         if not self._controller.engine.is_initialized:
             self._set_ocr_status("loading_model")
             self.stateChanged.emit()
             return
 
-        self._begin_ocr()
-
-    def _begin_ocr(self) -> None:
-        if not self._image_path or not self._image_path.exists():
-            return
-
-        self._ocr_running = True
-        self._set_ocr_status("processing")
-        self.stateChanged.emit()
-
+        self._ocr_text = ""
+        self._ocr_page_progress = ""
         try:
             self._controller.start_ocr(self._image_path)
         except Exception as exc:
             self._set_ocr_error(str(exc))
-            self._ocr_running = False
             self.stateChanged.emit()
 
     @Slot()
     def stopOcr(self) -> None:
-        self._set_ocr_status("stopped")
+        if self._operation != OP_OCR:
+            return
+        self._controller.cancel_ocr()
+        self._set_ocr_status("draining")
         self.stateChanged.emit()
 
     @Slot()
     def clearOcr(self) -> None:
+        if self.busy:
+            return
         self._ocr_text = ""
+        self._ocr_page_progress = ""
         self.stateChanged.emit()
 
     @Slot()
     def saveOcr(self) -> None:
-        if not self._ocr_text.strip():
-            QMessageBox.information(
-                None, "Nessun testo", "Non c'è testo da salvare."
-            )
+        if self.busy:
             return
-
-        default_name = (
-            self._image_path.stem + ".txt"
-            if self._image_path
-            else "ocr_output.txt"
-        )
+        if not self._ocr_text.strip():
+            QMessageBox.information(None, "Nessun testo", "Non c'è testo da salvare.")
+            return
+        default_name = self._image_path.stem + ".txt" if self._image_path else "ocr_output.txt"
         save_path, _ = QFileDialog.getSaveFileName(
             None,
             "Salva testo OCR",
@@ -382,11 +407,7 @@ class QmlBridge(QObject):
             try:
                 Path(save_path).write_text(self._ocr_text, encoding="utf-8")
             except OSError as exc:
-                QMessageBox.warning(
-                    None,
-                    "Errore salvataggio",
-                    f"Impossibile salvare:\n{exc}",
-                )
+                QMessageBox.warning(None, "Errore salvataggio", f"Impossibile salvare:\n{exc}")
 
     # ------------------------------------------------------------------
     # Batch
@@ -394,50 +415,55 @@ class QmlBridge(QObject):
 
     @Slot()
     def chooseBatchFiles(self) -> None:
+        if self.busy:
+            return
         extensions = " ".join(
             f"*{ext}" for ext in sorted(AppMeta.SUPPORTED_IMAGE_EXTENSIONS)
         )
         files, _ = QFileDialog.getOpenFileNames(
             None,
-            "Seleziona immagini",
+            "Seleziona file",
             "",
-            f"Immagini ({extensions})",
+            f"File supportati ({extensions})",
         )
         if files:
-            self._batch_paths = [Path(f) for f in files]
+            self._batch_paths = [Path(file) for file in files]
             self.stateChanged.emit()
 
     @Slot("QVariantList")
     def setBatchDroppedUrls(self, urls: list[Any]) -> None:
+        if self.busy:
+            return
         paths: list[Path] = []
         for value in urls:
             if isinstance(value, QUrl):
                 local = value.toLocalFile()
             else:
                 qurl = QUrl(str(value))
-                local = qurl.toLocalFile() if qurl.isLocalFile() else str(value)
-
+                local = qurl.toLocalFile() if qurl.isLocalFile() else ""
             if not local:
                 continue
-
             path = Path(local)
-            if path.suffix.lower() in AppMeta.SUPPORTED_IMAGE_EXTENSIONS:
+            if (
+                path.is_file()
+                and path.suffix.lower() in AppMeta.SUPPORTED_IMAGE_EXTENSIONS
+            ):
                 paths.append(path)
-
         if paths:
             self._batch_paths = paths
             self.stateChanged.emit()
 
     @Slot()
     def startBatch(self) -> None:
+        if self.busy:
+            return
         if not self._batch_paths:
             QMessageBox.information(
                 None,
-                "Nessuna immagine",
-                "Seleziona almeno un'immagine prima di avviare.",
+                "Nessun file",
+                "Seleziona almeno un file prima di avviare il batch.",
             )
             return
-
         if not self._controller.engine.is_initialized:
             QMessageBox.information(
                 None,
@@ -449,28 +475,25 @@ class QmlBridge(QObject):
         self._batch_text = ""
         self._batch_completed_count = 0
         self._batch_total_count = len(self._batch_paths)
-        self._batch_progress_text = ""
-
+        self._batch_progress_text = "0%"
         try:
             self._controller.run_batch(self._batch_paths)
         except Exception as exc:
             self._set_batch_error(str(exc))
             self.stateChanged.emit()
-            return
-
-        self._batch_running = True
-        self._set_batch_status("running")
-        self.stateChanged.emit()
 
     @Slot()
     def stopBatch(self) -> None:
+        if self._operation != OP_BATCH:
+            return
         self._controller.cancel_active_batch()
-        self._batch_running = False
-        self._set_batch_status("stopped")
+        self._set_batch_status("draining")
         self.stateChanged.emit()
 
     @Slot()
     def clearBatch(self) -> None:
+        if self.busy:
+            return
         self._batch_text = ""
         self._batch_completed_count = 0
         self._batch_total_count = 0
@@ -479,12 +502,11 @@ class QmlBridge(QObject):
 
     @Slot()
     def saveBatch(self) -> None:
-        if not self._batch_text.strip():
-            QMessageBox.information(
-                None, "Nessun testo", "Non c'è testo da salvare."
-            )
+        if self.busy:
             return
-
+        if not self._batch_text.strip():
+            QMessageBox.information(None, "Nessun testo", "Non c'è testo da salvare.")
+            return
         save_path, _ = QFileDialog.getSaveFileName(
             None,
             "Salva testo batch",
@@ -495,39 +517,48 @@ class QmlBridge(QObject):
             try:
                 Path(save_path).write_text(self._batch_text, encoding="utf-8")
             except OSError as exc:
-                QMessageBox.warning(
-                    None,
-                    "Errore salvataggio",
-                    f"Impossibile salvare:\n{exc}",
-                )
+                QMessageBox.warning(None, "Errore salvataggio", f"Impossibile salvare:\n{exc}")
 
     # ------------------------------------------------------------------
     # EventBridge
     # ------------------------------------------------------------------
 
     def _connect_events(self) -> None:
-        b = self._event_bridge
+        bridge = self._event_bridge
+        bridge.operation_changed.connect(self._on_operation_changed)
 
-        b.ocr_new_text.connect(self._on_ocr_new_text)
-        b.ocr_status_changed.connect(self._on_ocr_status)
-        b.ocr_error.connect(self._on_ocr_error)
-        b.ocr_completed.connect(self._on_ocr_completed)
-        b.ocr_page_progress.connect(self._on_ocr_page_progress)
+        bridge.ocr_new_text.connect(self._on_ocr_new_text)
+        bridge.ocr_status_changed.connect(self._on_ocr_status)
+        bridge.ocr_error.connect(self._on_ocr_error)
+        bridge.ocr_completed.connect(self._on_ocr_completed)
+        bridge.ocr_cancelled.connect(self._on_ocr_cancelled)
+        bridge.ocr_page_progress.connect(self._on_ocr_page_progress)
 
-        b.batch_new_text.connect(self._on_batch_new_text)
-        b.batch_status_changed.connect(self._on_batch_status)
-        b.batch_progress.connect(self._on_batch_progress)
-        b.batch_error.connect(self._on_batch_error)
-        b.batch_completed.connect(self._on_batch_completed)
+        bridge.batch_new_text.connect(self._on_batch_new_text)
+        bridge.batch_status_changed.connect(self._on_batch_status)
+        bridge.batch_progress.connect(self._on_batch_progress)
+        bridge.batch_error.connect(self._on_batch_error)
+        bridge.batch_completed.connect(self._on_batch_completed)
+        bridge.batch_cancelled.connect(self._on_batch_cancelled)
 
-        b.model_loading.connect(self._on_model_loading)
-        b.model_loaded.connect(self._on_model_loaded)
-        b.model_load_error.connect(self._on_model_load_error)
-        b.model_load_progress.connect(self._on_model_load_progress)
+        bridge.model_loading.connect(self._on_model_loading)
+        bridge.model_loaded.connect(self._on_model_loaded)
+        bridge.model_load_cancelled.connect(self._on_model_load_cancelled)
+        bridge.model_load_error.connect(self._on_model_load_error)
+        bridge.model_load_progress.connect(self._on_model_load_progress)
+
+    @Slot(str)
+    def _on_operation_changed(self, operation: str) -> None:
+        self._operation = operation or OP_IDLE
+        self.stateChanged.emit()
 
     @Slot(str)
     def _on_ocr_new_text(self, text: str) -> None:
-        self._ocr_text += text + "\n"
+        if self._ocr_text and not self._ocr_text.endswith("\n"):
+            self._ocr_text += "\n"
+        self._ocr_text += text
+        if not self._ocr_text.endswith("\n"):
+            self._ocr_text += "\n"
         self.stateChanged.emit()
 
     @Slot(str)
@@ -537,12 +568,18 @@ class QmlBridge(QObject):
 
     @Slot(str)
     def _on_ocr_error(self, message: str) -> None:
+        self._ocr_page_progress = ""
         self._set_ocr_error(message)
         self.stateChanged.emit()
 
     @Slot()
     def _on_ocr_completed(self) -> None:
-        self._ocr_running = False
+        self._ocr_page_progress = ""
+        self._set_ocr_status("completed")
+        self.stateChanged.emit()
+
+    @Slot()
+    def _on_ocr_cancelled(self) -> None:
         self._ocr_page_progress = ""
         self._set_ocr_status("stopped")
         self.stateChanged.emit()
@@ -554,20 +591,27 @@ class QmlBridge(QObject):
 
     @Slot(str)
     def _on_batch_new_text(self, text: str) -> None:
-        self._batch_completed_count += 1
-        self._batch_text += text + "\n"
+        if self._batch_text and not self._batch_text.endswith("\n"):
+            self._batch_text += "\n"
+        self._batch_text += text
+        if not self._batch_text.endswith("\n"):
+            self._batch_text += "\n"
         self.stateChanged.emit()
 
     @Slot(str)
     def _on_batch_status(self, status: str) -> None:
         self._set_batch_status(status)
-        if status == "completed":
-            self._batch_running = False
         self.stateChanged.emit()
 
-    @Slot(int)
-    def _on_batch_progress(self, percent: int) -> None:
-        self._batch_progress_text = f"{percent}/100"
+    @Slot(int, int)
+    def _on_batch_progress(self, completed: int, total: int) -> None:
+        self._batch_completed_count = max(0, completed)
+        self._batch_total_count = max(0, total)
+        if total > 0:
+            percent = int(round((completed / total) * 100))
+            self._batch_progress_text = f"{max(0, min(100, percent))}%"
+        else:
+            self._batch_progress_text = ""
         self.stateChanged.emit()
 
     @Slot(str)
@@ -577,9 +621,15 @@ class QmlBridge(QObject):
 
     @Slot()
     def _on_batch_completed(self) -> None:
-        self._batch_running = False
-        self._batch_progress_text = "100/100"
+        if self._batch_total_count > 0:
+            self._batch_completed_count = self._batch_total_count
+            self._batch_progress_text = "100%"
         self._set_batch_status("completed")
+        self.stateChanged.emit()
+
+    @Slot()
+    def _on_batch_cancelled(self) -> None:
+        self._set_batch_status("stopped")
         self.stateChanged.emit()
 
     @Slot(str)
@@ -590,14 +640,20 @@ class QmlBridge(QObject):
         self._event_bridge.start_model_loading(device)
 
     @Slot(str, str)
-    def _on_model_loaded(self, backend: str, device: str) -> None:
-        self._selected_device = device or self._selected_device
+    def _on_model_loaded(self, _backend: str, device: str) -> None:
+        if device:
+            self._selected_device = device
         self._set_ocr_status("idle")
         self._set_batch_status("idle")
         self.stateChanged.emit()
+        # Nessun auto-start: cambiare device non deve lanciare OCR per un
+        # file precedentemente selezionato.
 
-        if self._image_path and self._image_path.exists():
-            self._begin_ocr()
+    @Slot()
+    def _on_model_load_cancelled(self) -> None:
+        self._set_ocr_status("stopped")
+        self._set_batch_status("stopped")
+        self.stateChanged.emit()
 
     @Slot(str)
     def _on_model_load_error(self, message: str) -> None:

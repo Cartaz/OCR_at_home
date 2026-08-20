@@ -9,13 +9,19 @@ from typing import Any
 
 from config.constants import AppConstants, OCRDefaults
 from core.cancellation import CancellationToken
-from core.exceptions import ModelLoadError, OCREngineNotInitializedError, OperationBusyError
+from core.exceptions import (
+    ModelLoadError,
+    OCREngineNotInitializedError,
+    OperationBusyError,
+    OperationCancelledError,
+)
 from core.models import OCRResult
 
 logger = logging.getLogger(__name__)
 
 BACKEND_LLAMA_CPP = OCRDefaults.LLAMA_CPP_DEVICE
 BACKEND_LLAMA_CPP_SYCL = OCRDefaults.LLAMA_CPP_SYCL_DEVICE
+_SUPPORTED_BACKENDS = {BACKEND_LLAMA_CPP, BACKEND_LLAMA_CPP_SYCL}
 
 
 class OCREngine:
@@ -50,6 +56,11 @@ class OCREngine:
         *,
         cancel_token: CancellationToken | None = None,
     ) -> None:
+        if device not in _SUPPORTED_BACKENDS:
+            raise ModelLoadError(
+                "llama-cpp",
+                f"Backend non supportato: {device}",
+            )
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
 
@@ -65,6 +76,8 @@ class OCREngine:
                 if device == BACKEND_LLAMA_CPP_SYCL
                 else BACKEND_LLAMA_CPP
             )
+
+            backend: Any = None
             try:
                 from core.llama_backend import LlamaServerBackend
 
@@ -72,12 +85,21 @@ class OCREngine:
                 backend.initialize(cancel_token=cancel_token)
                 if cancel_token is not None:
                     cancel_token.raise_if_cancelled()
+                # Pubblicare il backend solo dopo startup e cancellation check.
                 self._llama_backend = backend
                 self._initialized = True
             except Exception as exc:
+                # Se la cancellazione/failure avviene dopo che il processo è
+                # partito ma prima della pubblicazione, il backend locale deve
+                # comunque essere chiuso: altrimenti resta un llama-server orfano.
+                if backend is not None:
+                    try:
+                        backend.shutdown()
+                    except Exception:
+                        logger.exception("Errore cleanup backend dopo initialize fallita")
                 self._initialized = False
                 self._llama_backend = None
-                if isinstance(exc, ModelLoadError):
+                if isinstance(exc, (ModelLoadError, OperationCancelledError)):
                     raise
                 raise ModelLoadError(
                     "llama-cpp",
@@ -113,18 +135,20 @@ class OCREngine:
             self._inference_lock.release()
 
     def shutdown(self) -> None:
+        # Blocca finché un'eventuale inferenza non ha restituito il controllo.
+        # AppController cancella prima il token così l'I/O HTTP viene interrotto.
         with self._inference_lock:
             with self._lifecycle_lock:
                 self._shutdown_backend_locked()
                 self._initialized = False
 
     def _shutdown_backend_locked(self) -> None:
-        if self._llama_backend is None:
+        backend = self._llama_backend
+        self._llama_backend = None
+        self._initialized = False
+        if backend is None:
             return
         try:
-            self._llama_backend.shutdown()
+            backend.shutdown()
         except Exception as exc:
             logger.warning("Errore arresto backend llama.cpp: %s", exc)
-        finally:
-            self._llama_backend = None
-            self._initialized = False

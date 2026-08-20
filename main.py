@@ -1,12 +1,11 @@
 # main.py
-"""GLM OCR — entry point con frontend Qt Quick/QML."""
+"""GLM OCR — entry point Qt Quick/QML."""
 
 from __future__ import annotations
 
 import atexit
 import logging
 import signal
-import subprocess
 import sys
 from pathlib import Path
 
@@ -23,6 +22,8 @@ from core.app_controller import AppController
 from ui.qml_bridge import QmlBridge
 from ui.tray_icon import TrayIcon
 
+_controller_ref: list[AppController | None] = [None]
+
 
 def setup_logging() -> None:
     AppMeta.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,36 +38,26 @@ def setup_logging() -> None:
     )
 
 
-def _kill_orphan_llama_server() -> None:
+def _shutdown_controller_ref() -> None:
+    """Arresta solo le risorse possedute dall'istanza corrente dell'app."""
+    controller = _controller_ref[0]
+    if controller is None:
+        return
     try:
-        subprocess.run(
-            ["pkill", "llama-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        controller.shutdown()
     except Exception:
-        pass
+        logging.getLogger("GLM OCR").exception("Errore durante lo shutdown")
 
 
-_controller_ref: list[AppController | None] = [None]
-
-
-def _signal_handler(signum: int, frame: object) -> None:
+def _signal_handler(signum: int, _frame: object) -> None:
     logger = logging.getLogger("GLM OCR")
     logger.info("Segnale %s ricevuto, arresto in corso...", signum)
-
-    if _controller_ref[0] is not None:
-        try:
-            _controller_ref[0].shutdown()
-        except Exception:
-            pass
-
-    _kill_orphan_llama_server()
-    sys.exit(0)
+    _shutdown_controller_ref()
+    raise SystemExit(0)
 
 
 def _widget_aux_stylesheet() -> str:
-    """Tema dei soli widget rimasti: tray menu e dialoghi non nativi."""
+    """Tema dei widget residui: tray menu, dialoghi e tooltip."""
     return f"""
     QMenu {{
         background-color: #1A1A1A;
@@ -120,26 +111,28 @@ def main() -> None:
 
     controller = AppController(settings=settings)
     _controller_ref[0] = controller
-
-    atexit.register(_kill_orphan_llama_server)
+    atexit.register(_shutdown_controller_ref)
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    _sigint_timer = QTimer()
-    _sigint_timer.timeout.connect(lambda: None)
-    _sigint_timer.start(50)
+    # Permette all'interprete Python di processare SIGINT anche mentre Qt è
+    # nell'event loop senza introdurre thread o handler nativi aggiuntivi.
+    sigint_timer = QTimer()
+    sigint_timer.timeout.connect(lambda: None)
+    sigint_timer.start(50)
 
     bridge = QmlBridge(controller)
+    app.aboutToQuit.connect(bridge.shutdown)
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("backend", bridge)
 
     qml_path = Path(__file__).parent / "qml" / "Main.qml"
     engine.load(QUrl.fromLocalFile(str(qml_path)))
-
     if not engine.rootObjects():
         logger.error("Impossibile caricare la UI QML: %s", qml_path)
-        sys.exit(1)
+        bridge.shutdown()
+        raise SystemExit(1)
 
     window = engine.rootObjects()[0]
     bridge.set_window(window)
@@ -158,16 +151,14 @@ def main() -> None:
         icon_path=str(icon_path) if icon_path.exists() else None,
     )
     tray.show()
-
     tray.show_window_requested.connect(bridge.showWindow)
     tray.connect_start_action(bridge.startOcr)
     tray.connect_stop_action(bridge.stopOcr)
     tray.quit_requested.connect(bridge.forceQuit)
 
     controller.initialize()
-
     logger.info("GLM OCR pronto")
-    sys.exit(app.exec())
+    raise SystemExit(app.exec())
 
 
 if __name__ == "__main__":

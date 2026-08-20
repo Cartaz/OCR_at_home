@@ -26,16 +26,16 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Q"; onActivated: backend.forceQuit() }
     Shortcut { sequence: "Ctrl+M"; onActivated: backend.minimizeToTray() }
 
-    Shortcut { sequence: "Ctrl+R"; enabled: window.currentTab === 0; onActivated: backend.startOcr() }
-    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 0; onActivated: backend.stopOcr() }
-    Shortcut { sequence: "F5"; enabled: window.currentTab === 0; onActivated: backend.refreshDevices() }
-    Shortcut { sequence: "Ctrl+L"; enabled: window.currentTab === 0; onActivated: backend.clearOcr() }
-    Shortcut { sequence: "Ctrl+Shift+S"; enabled: window.currentTab === 0; onActivated: backend.saveOcr() }
+    Shortcut { sequence: "Ctrl+R"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.startOcr() }
+    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 0 && backend.ocrRunning; onActivated: backend.stopOcr() }
+    Shortcut { sequence: "F5"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.refreshDevices() }
+    Shortcut { sequence: "Ctrl+L"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.clearOcr() }
+    Shortcut { sequence: "Ctrl+Shift+S"; enabled: window.currentTab === 0 && !backend.busy; onActivated: backend.saveOcr() }
 
-    Shortcut { sequence: "Ctrl+B"; enabled: window.currentTab === 1; onActivated: backend.startBatch() }
-    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 1; onActivated: backend.stopBatch() }
-    Shortcut { sequence: "Ctrl+L"; enabled: window.currentTab === 1; onActivated: backend.clearBatch() }
-    Shortcut { sequence: "Ctrl+Shift+S"; enabled: window.currentTab === 1; onActivated: backend.saveBatch() }
+    Shortcut { sequence: "Ctrl+B"; enabled: window.currentTab === 1 && !backend.busy; onActivated: backend.startBatch() }
+    Shortcut { sequence: "Ctrl+S"; enabled: window.currentTab === 1 && backend.batchRunning; onActivated: backend.stopBatch() }
+    Shortcut { sequence: "Ctrl+L"; enabled: window.currentTab === 1 && !backend.busy; onActivated: backend.clearBatch() }
+    Shortcut { sequence: "Ctrl+Shift+S"; enabled: window.currentTab === 1 && !backend.busy; onActivated: backend.saveBatch() }
 
     ColumnLayout {
         anchors.fill: parent
@@ -102,7 +102,7 @@ ApplicationWindow {
                                 id: languageCombo
                                 model: ["Italiano + Inglese", "Inglese", "Italiano", "Francese", "Tedesco", "Spagnolo"]
                                 currentIndex: backend.languageIndex
-                                enabled: !backend.ocrRunning
+                                enabled: !backend.busy
                                 Layout.fillWidth: true
                                 onActivated: backend.setLanguageIndex(index)
                             }
@@ -110,7 +110,7 @@ ApplicationWindow {
                             NeoCheckBox {
                                 text: "Pre-elaborazione"
                                 checked: backend.preprocessingEnabled
-                                enabled: !backend.ocrRunning
+                                enabled: !backend.busy
                                 Layout.preferredWidth: 150
                                 onToggled: backend.setPreprocessing(checked)
                             }
@@ -132,7 +132,7 @@ ApplicationWindow {
                                 model: backend.devices
                                 textRole: "label"
                                 currentIndex: backend.deviceIndex
-                                enabled: !backend.ocrRunning
+                                enabled: !backend.busy
                                 Layout.fillWidth: true
                                 onActivated: backend.setDeviceIndex(index)
                             }
@@ -156,7 +156,7 @@ ApplicationWindow {
 
                             NeoButton {
                                 text: "Sfoglia..."
-                                enabled: !backend.ocrRunning
+                                enabled: !backend.busy
                                 Layout.preferredWidth: 86
                                 onClicked: backend.chooseOcrFile()
                             }
@@ -173,11 +173,11 @@ ApplicationWindow {
                             columnSpacing: 8
                             Layout.fillWidth: true
 
-                            ActionUnit { label: "Avvia OCR"; shortcutText: "Ctrl+R"; primary: true; buttonEnabled: !backend.ocrRunning; Layout.fillWidth: true; onTriggered: backend.startOcr() }
+                            ActionUnit { label: "Avvia OCR"; shortcutText: "Ctrl+R"; primary: true; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.startOcr() }
                             ActionUnit { label: "Ferma"; shortcutText: "Ctrl+S"; danger: true; buttonEnabled: backend.ocrRunning; Layout.fillWidth: true; onTriggered: backend.stopOcr() }
-                            ActionUnit { label: "Aggiorna"; shortcutText: "F5"; buttonEnabled: !backend.ocrRunning; Layout.fillWidth: true; onTriggered: backend.refreshDevices() }
-                            ActionUnit { label: "Cancella"; shortcutText: "Ctrl+L"; Layout.fillWidth: true; onTriggered: backend.clearOcr() }
-                            ActionUnit { label: "Salva Testo"; shortcutText: "Ctrl+Shift+S"; Layout.fillWidth: true; onTriggered: backend.saveOcr() }
+                            ActionUnit { label: "Aggiorna"; shortcutText: "F5"; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.refreshDevices() }
+                            ActionUnit { label: "Cancella"; shortcutText: "Ctrl+L"; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.clearOcr() }
+                            ActionUnit { label: "Salva Testo"; shortcutText: "Ctrl+Shift+S"; buttonEnabled: !backend.busy && backend.ocrText.trim().length > 0; Layout.fillWidth: true; onTriggered: backend.saveOcr() }
                             Item { Layout.fillWidth: true; Layout.preferredHeight: theme.controlHeight }
                         }
                     }
@@ -225,13 +225,17 @@ ApplicationWindow {
                             DropArea {
                                 id: batchDrop
                                 anchors.fill: parent
+                                enabled: !backend.busy
                                 onDropped: function(drop) {
                                     backend.setBatchDroppedUrls(drop.urls)
                                     drop.acceptProposedAction()
                                 }
                             }
 
-                            TapHandler { onTapped: backend.chooseBatchFiles() }
+                            TapHandler {
+                                enabled: !backend.busy
+                                onTapped: backend.chooseBatchFiles()
+                            }
                         }
                     }
 
@@ -245,16 +249,16 @@ ApplicationWindow {
                             columnSpacing: 8
                             Layout.fillWidth: true
 
-                            ActionUnit { label: "Avvia Batch"; shortcutText: "Ctrl+B"; primary: true; buttonEnabled: !backend.batchRunning; Layout.fillWidth: true; onTriggered: backend.startBatch() }
+                            ActionUnit { label: "Avvia Batch"; shortcutText: "Ctrl+B"; primary: true; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.startBatch() }
                             ActionUnit { label: "Ferma"; shortcutText: "Ctrl+S"; danger: true; buttonEnabled: backend.batchRunning; Layout.fillWidth: true; onTriggered: backend.stopBatch() }
-                            ActionUnit { label: "Cancella"; shortcutText: "Ctrl+L"; buttonEnabled: !backend.batchRunning; Layout.fillWidth: true; onTriggered: backend.clearBatch() }
-                            ActionUnit { label: "Salva Testo"; shortcutText: "Ctrl+Shift+S"; buttonEnabled: !backend.batchRunning && backend.batchText.trim().length > 0; Layout.fillWidth: true; onTriggered: backend.saveBatch() }
+                            ActionUnit { label: "Cancella"; shortcutText: "Ctrl+L"; buttonEnabled: !backend.busy; Layout.fillWidth: true; onTriggered: backend.clearBatch() }
+                            ActionUnit { label: "Salva Testo"; shortcutText: "Ctrl+Shift+S"; buttonEnabled: !backend.busy && backend.batchText.trim().length > 0; Layout.fillWidth: true; onTriggered: backend.saveBatch() }
                         }
                     }
 
                     OutputArea {
                         outputText: backend.batchText
-                        placeholderText: "Trascina le immagini qui sopra o clicca per sfogliare...\n\nIl testo estratto apparirà in quest'area."
+                        placeholderText: "Trascina immagini o PDF qui sopra o clicca per sfogliare...\n\nIl testo estratto apparirà in quest'area."
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         Layout.minimumHeight: 92

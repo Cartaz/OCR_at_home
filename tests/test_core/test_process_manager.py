@@ -1,77 +1,89 @@
-"""Test per core/process_manager.py — verifica gestione batch OCR.
+"""Regressioni di concorrenza per ProcessManager."""
 
-Tests:
-    - cancel_active_batch è una no-op sicura quando non ci sono job attivi
-    - submit_batch crea un job con il numero corretto di task
-    - cancel_batch imposta lo stato CANCELLED sul job
-    - active_job_id è esposto come property pubblica
-"""
+from __future__ import annotations
+
 import threading
+import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
-from core.models import JobStatus
+import pytest
+
+from core.exceptions import BatchProcessingError
+from core.models import JobStatus, OCRResult
 from core.process_manager import ProcessManager
 
 
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+class BlockingEngine:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def process_image(self, _path: Path, **_kwargs: object) -> OCRResult:
+        self.started.set()
+        self.release.wait(timeout=3)
+        return OCRResult(text="ok", confidence=0.9)
+
+
 def test_cancel_active_batch_when_no_active_job() -> None:
-    """Verifica che cancel_active_batch non sollevi eccezioni se non
-    ci sono job attivi."""
-    engine = MagicMock()
-    pm = ProcessManager(engine)
-    # Nessun job attivo: deve essere una no-op sicura
-    pm.cancel_active_batch()
-    assert pm.active_job_id is None
-    pm.shutdown()
+    engine = BlockingEngine()
+    manager = ProcessManager(engine)  # type: ignore[arg-type]
+    manager.cancel_active_batch()
+    assert manager.active_job_id is None
+    manager.shutdown()
 
 
 def test_submit_batch_creates_correct_task_count() -> None:
-    """Verifica che submit_batch crei un job con il numero di task
-    corrispondente alle immagini passate."""
-    engine = MagicMock()
-    # Fa sì che process_image attenda un evento, così possiamo ispezionare
-    # lo stato del job prima che venga completato dal worker thread.
-    done_event = threading.Event()
-
-    def slow_process(_path):
-        done_event.wait(timeout=2)
-        return MagicMock()
-
-    engine.process_image.side_effect = slow_process
-    pm = ProcessManager(engine)
-    paths = [Path(f"img{i}.png") for i in range(5)]
-    job = pm.submit_batch(paths)
+    engine = BlockingEngine()
+    manager = ProcessManager(engine)  # type: ignore[arg-type]
+    job = manager.submit_batch([Path(f"img{i}.png") for i in range(5)])
     try:
+        assert engine.started.wait(timeout=1)
         assert job.total_count == 5
         assert len(job.tasks) == 5
-        # active_job_id deve corrispondere al job appena sottomesso
-        assert pm.active_job_id == job.job_id
+        assert manager.active_job_id == job.job_id
     finally:
-        # Sblocca il worker e arresta in modo pulito
-        done_event.set()
-        pm.shutdown()
+        manager.cancel_active_batch()
+        engine.release.set()
+        assert _wait_until(lambda: manager.active_job_id is None)
+        manager.shutdown()
 
 
-def test_cancel_batch_marks_job_cancelled() -> None:
-    """Verifica che cancel_batch imposti lo stato CANCELLED sul job."""
-    engine = MagicMock()
-    done_event = threading.Event()
-    engine.process_image.side_effect = lambda _p: done_event.wait(timeout=2)
-    pm = ProcessManager(engine)
-    job = pm.submit_batch([Path("a.png")])
+def test_cancelled_job_stays_active_until_worker_really_exits() -> None:
+    engine = BlockingEngine()
+    manager = ProcessManager(engine)  # type: ignore[arg-type]
+    job = manager.submit_batch([Path("a.png")])
     try:
-        pm.cancel_batch(job.job_id)
+        assert engine.started.wait(timeout=1)
+        manager.cancel_batch(job.job_id)
         assert job.status == JobStatus.CANCELLED
+        # La cancellazione è una richiesta: la risorsa resta occupata finché
+        # il task in corso non restituisce il controllo al manager.
+        assert manager.active_job_id == job.job_id
+        with pytest.raises(BatchProcessingError):
+            manager.submit_batch([Path("b.png")])
     finally:
-        done_event.set()
-        pm.shutdown()
+        engine.release.set()
+        assert _wait_until(lambda: manager.active_job_id is None)
+        manager.shutdown()
 
 
-def test_active_job_id_is_public_property() -> None:
-    """Verifica che active_job_id sia esposto come property pubblica
-    (regressione: prima era accessibile solo via attributo privato)."""
-    engine = MagicMock()
-    pm = ProcessManager(engine)
-    # Deve essere leggibile come property, non come attributo privato
-    assert isinstance(pm.active_job_id, property) or pm.active_job_id is None
-    pm.shutdown()
+def test_completed_batch_releases_active_job() -> None:
+    class FastEngine:
+        def process_image(self, _path: Path, **_kwargs: object) -> OCRResult:
+            return OCRResult(text="ok", confidence=0.9)
+
+    manager = ProcessManager(FastEngine())  # type: ignore[arg-type]
+    job = manager.submit_batch([Path("a.png"), Path("b.png")])
+    assert _wait_until(lambda: manager.active_job_id is None)
+    assert job.status == JobStatus.COMPLETED
+    assert job.completed_count == 2
+    manager.shutdown()

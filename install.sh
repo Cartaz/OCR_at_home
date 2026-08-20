@@ -1,360 +1,168 @@
 #!/usr/bin/env bash
-# Script di installazione per GLM OCR su CachyOS/Arch Linux
-#
-# Usa esclusivamente llama.cpp + SYCL come backend per l'OCR.
-# llama-server viene compilato con GGML_SYCL=1 per l'accelerazione
-# GPU Intel Arc e installato nel venv (.venv/bin/).
-#
-# Il binary SYCL è protetto da aggiornamenti pacman che sovrascrivono
-# /usr/bin/llama-server con la versione CPU-only.
-#
-# Il modello GGUF (GLM-OCR-Q8_0 + mmproj) viene scaricato durante
-# l'installazione (~1.4 GB). Il primo avvio sarà immediato.
+# Installazione locale di GLM OCR per CachyOS/Arch Linux.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-APP_NAME="GLM OCR"
+VENV_DIR="$SCRIPT_DIR/.venv"
+CACHE_DIR="$SCRIPT_DIR/.cache"
+LLAMA_SRC="$CACHE_DIR/llama.cpp"
+LLAMA_BUILD="$LLAMA_SRC/build-glm-ocr-sycl"
+LLAMA_CPP_REPO="https://github.com/ggml-org/llama.cpp.git"
+# Snapshot fissato per riproducibilità il 2026-08-20. Aggiornare il pin
+# intenzionalmente dopo test, non tramite un git pull implicito.
+LLAMA_CPP_COMMIT="07822bddf80d73f1168e592c52e69caaff820f9c"
 APP_ID="com.glm-ocr.app"
 
-echo "+==================================================+"
-echo "|        ${APP_NAME} - Installazione               |"
-echo "+==================================================+"
-echo ""
+log() { printf '\n==> %s\n' "$*"; }
+warn() { printf '\nATTENZIONE: %s\n' "$*" >&2; }
 
-# ======================================================================
-# FASE 1: Ricerca Python compatibile
-# ======================================================================
+find_python() {
+    local candidate
+    for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            "$candidate" - <<'PY' >/dev/null 2>&1 && {
+                printf '%s\n' "$candidate"
+                return 0
+            }
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+        fi
+    done
+    return 1
+}
 
-PYTHON_CMD=""
-
-echo "-- Ricerca Python --"
-
-for py_cmd in python3 python3.14 python3.13 python3.12 python3.11; do
-    if command -v "$py_cmd" &>/dev/null; then
-        PY_VER=$($py_cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        echo "  Trovato $py_cmd (Python $PY_VER)"
-        PYTHON_CMD="$py_cmd"
-        break
-    fi
-done
-
-if [ -z "$PYTHON_CMD" ]; then
-    echo "  !  NESSUN Python trovato!"
-    echo "  Installa Python 3.11+ e ri-esegui questo script."
+PYTHON_CMD="$(find_python || true)"
+if [[ -z "$PYTHON_CMD" ]]; then
+    echo "Serve Python 3.11 o successivo." >&2
     exit 1
 fi
 
-PYTHON_VERSION=$($PYTHON_CMD -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-
-echo ""
-echo "Python selezionato: $PYTHON_CMD (versione $PYTHON_VERSION)"
-echo ""
-
-# ======================================================================
-# FASE 2: Creazione ambiente virtuale
-# ======================================================================
-
-VENV_DIR="$SCRIPT_DIR/.venv"
-if [ -d "$VENV_DIR" ]; then
-    echo "Rimozione ambiente virtuale esistente..."
-    rm -rf "$VENV_DIR"
+log "Ambiente Python"
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    "$PYTHON_CMD" -m venv "$VENV_DIR"
 fi
+"$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+"$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
-echo "Creazione ambiente virtuale con $PYTHON_CMD..."
-$PYTHON_CMD -m venv "$VENV_DIR"
-
-# Attiva ambiente virtuale
-source "$VENV_DIR/bin/activate"
-
-# Aggiorna pip
-pip install --upgrade pip setuptools wheel
-
-# ======================================================================
-# FASE 3: Installazione dipendenze
-# ======================================================================
-
-echo ""
-echo "-- Installazione dipendenze --"
-
-# Dipendenze per UI e funzionalità core (nessun PyTorch o OpenVINO)
-pip install "PySide6>=6.6.0"
-pip install "Pillow>=10.0.0"
-pip install "numpy>=1.26.0"
-pip install "huggingface_hub"
-pip install "PyMuPDF>=1.24.0"
-
-# ======================================================================
-# FASE 4: Compilazione llama.cpp con SYCL
-# ======================================================================
-# Compila llama-server con SYCL e lo installa nel venv.
-# Il binary è self-contained: pacman non lo tocca.
-
-echo ""
-echo "-- Compilazione llama.cpp con SYCL --"
-
-# Verifica prerequisiti
-if ! command -v cmake &>/dev/null; then
-    echo "  Installazione cmake..."
-    sudo pacman -S --needed --noconfirm cmake
-fi
-
-# Verifica Intel oneAPI
-if [ ! -f "/opt/intel/oneapi/setvars.sh" ]; then
-    echo "  !  Intel oneAPI non trovato!"
-    echo "  Installa con: yay -S intel-oneapi-basekit"
-    echo ""
-    echo "  Proseguo con la versione CPU-only di llama-server..."
-    echo ""
-else
-    LLAMA_SRC="$SCRIPT_DIR/.cache/llama.cpp"
-
-    # Clone o pull dei sorgenti
-    if [ -d "$LLAMA_SRC" ]; then
-        echo "  Aggiornamento sorgenti llama.cpp..."
-        cd "$LLAMA_SRC" && git pull || true
-    else
-        echo "  Download sorgenti llama.cpp..."
-        mkdir -p "$SCRIPT_DIR/.cache"
-        git clone https://github.com/ggml-org/llama.cpp "$LLAMA_SRC"
+build_sycl_llama() {
+    if [[ ! -f /opt/intel/oneapi/setvars.sh ]]; then
+        warn "Intel oneAPI non trovato: salto la build SYCL locale."
+        return 1
     fi
 
-    # Build con SYCL
-    BUILD_DIR="$LLAMA_SRC/build"
-    rm -rf "$BUILD_DIR"
-    mkdir -p "$BUILD_DIR"
-    cd "$BUILD_DIR"
-
-    echo "  Compilazione con SYCL (può richiedere 5-10 minuti)..."
-    bash -c "source /opt/intel/oneapi/setvars.sh && \
-        cmake .. -DGGML_SYCL=1 -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx && \
-        cmake --build . --config Release -j$(nproc)"
-
-    # Copia il binary nel venv
-    if [ -f "$BUILD_DIR/bin/llama-server" ]; then
-        cp "$BUILD_DIR/bin/llama-server" "$VENV_DIR/bin/llama-server"
-        chmod +x "$VENV_DIR/bin/llama-server"
-
-        # Copia le librerie condivise in .venv/lib/
-        # CRITICO: senza queste .so, il binary SYCL non può caricare
-        # il backend GPU a runtime (exit code 127)
-        mkdir -p "$VENV_DIR/lib"
-        for so_pattern in \
-            "libggml-sycl.so*" \
-            "libggml.so*" \
-            "libggml-cpu.so*" \
-            "libggml-base.so*" \
-            "libllama.so*" \
-            "libllama-common.so*" \
-            "libllama-server-impl.so*" \
-            "libmtmd.so*"
-        do
-            for so_file in "$BUILD_DIR/bin"/$so_pattern; do
-                if [ -f "$so_file" ]; then
-                    cp "$so_file" "$VENV_DIR/lib/"
-                fi
-            done
-        done
-
-        # Verifica compilatore
-        COMPILER_INFO=$("$VENV_DIR/bin/llama-server" --version 2>&1 | head -5)
-        if echo "$COMPILER_INFO" | grep -qi "intelllvm\|intel llvm\|icx"; then
-            echo "  OK llama-server con SYCL installato nel venv!"
-            echo "    Librerie condivise copiate in $VENV_DIR/lib/"
-            echo "    Compilatore: IntelLLVM (SYCL abilitato)"
-        else
-            echo "  !  llama-server compilato ma compilatore non IntelLLVM"
-            echo "    Output: $COMPILER_INFO"
+    local command_name
+    for command_name in git cmake make; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            warn "$command_name non trovato: impossibile compilare llama.cpp SYCL."
+            return 1
         fi
-    else
-        echo "  !  Build fallito: bin/llama-server non trovato"
-        echo "    L'app userà il binary di sistema (CPU-only)"
-    fi
-
-    # Pulizia artefatti di build per risparmiare spazio
-    echo "  Pulizia artefatti di build..."
-    rm -rf "$BUILD_DIR"
-fi
-
-# ======================================================================
-# FASE 5: Download modelli GGUF
-# ======================================================================
-
-echo ""
-echo "-- Download modello GGUF (GLM-OCR Q8_0) --"
-echo ""
-
-GGUF_DIR="$HOME/.cache/glm-ocr/models/gguf"
-mkdir -p "$GGUF_DIR"
-
-# Modelli da scaricare
-GGUF_FILES=("GLM-OCR-Q8_0.gguf" "mmproj-GLM-OCR-Q8_0.gguf")
-GGUF_REPO="ggml-org/GLM-OCR-GGUF"
-ALL_PRESENT=true
-
-for f in "${GGUF_FILES[@]}"; do
-    if [ ! -f "$GGUF_DIR/$f" ]; then
-        ALL_PRESENT=false
-        break
-    fi
-done
-
-if [ "$ALL_PRESENT" = true ]; then
-    echo "  OK Modelli GGUF già presenti nella cache"
-    for f in "${GGUF_FILES[@]}"; do
-        SIZE=$(du -h "$GGUF_DIR/$f" | cut -f1)
-        echo "    $f ($SIZE)"
     done
-else
-    echo "  Download modelli GGUF da HuggingFace..."
-    echo "  Repo: $GGUF_REPO"
-    echo ""
 
-    python -c "
-from huggingface_hub import hf_hub_download
-import os
+    log "llama.cpp SYCL pinned a $LLAMA_CPP_COMMIT"
+    mkdir -p "$CACHE_DIR"
+    if [[ ! -d "$LLAMA_SRC/.git" ]]; then
+        git clone --filter=blob:none "$LLAMA_CPP_REPO" "$LLAMA_SRC"
+    fi
 
-repo = '$GGUF_REPO'
-local_dir = '$GGUF_DIR'
-files = ['GLM-OCR-Q8_0.gguf', 'mmproj-GLM-OCR-Q8_0.gguf']
+    git -C "$LLAMA_SRC" fetch --depth 1 origin "$LLAMA_CPP_COMMIT"
+    git -C "$LLAMA_SRC" checkout --detach --force "$LLAMA_CPP_COMMIT"
+    git -C "$LLAMA_SRC" clean -fdx
 
-for f in files:
-    path = os.path.join(local_dir, f)
-    if os.path.exists(path):
-        size_mb = os.path.getsize(path) / (1024*1024)
-        print(f'  OK {f} già presente ({size_mb:.0f} MB)')
-        continue
-    print(f'  Scaricamento {f}...')
-    downloaded = hf_hub_download(
-        repo_id=repo,
-        filename=f,
-        local_dir=local_dir,
-    )
-    import shutil
-    dl_path = os.path.join(local_dir, f)
-    if os.path.exists(downloaded) and downloaded != dl_path:
-        shutil.copy2(downloaded, dl_path)
-    size_mb = os.path.getsize(dl_path) / (1024*1024)
-    print(f'  OK {f} scaricato ({size_mb:.0f} MB)')
-" || {
-        echo ""
-        echo "  !  Download automatico fallito!"
-        echo "  Puoi scaricare i modelli manualmente:"
-        echo ""
-        echo "    # Modello principale (~0.9 GB)"
-        echo "    wget -O $GGUF_DIR/GLM-OCR-Q8_0.gguf \\"
-        echo "      'https://huggingface.co/$GGUF_REPO/resolve/main/GLM-OCR-Q8_0.gguf'"
-        echo ""
-        echo "    # Proiettore multimodale (~0.5 GB)"
-        echo "    wget -O $GGUF_DIR/mmproj-GLM-OCR-Q8_0.gguf \\"
-        echo "      'https://huggingface.co/$GGUF_REPO/resolve/main/mmproj-GLM-OCR-Q8_0.gguf'"
-        echo ""
-        echo "  Dopo il download, riavvia l'app."
-    }
-fi
+    rm -rf "$LLAMA_BUILD"
+    local jobs
+    jobs="$(( ($(nproc) + 1) / 2 ))"
+    (( jobs < 1 )) && jobs=1
 
-# ======================================================================
-# FASE 6: Verifica GPU Intel
-# ======================================================================
+    bash -c "
+        set -euo pipefail
+        source /opt/intel/oneapi/setvars.sh >/dev/null
+        cmake -S '$LLAMA_SRC' -B '$LLAMA_BUILD' \\
+            -DGGML_SYCL=ON \\
+            -DCMAKE_C_COMPILER=icx \\
+            -DCMAKE_CXX_COMPILER=icpx \\
+            -DCMAKE_BUILD_TYPE=Release \\
+            -DLLAMA_OPENSSL=OFF
+        cmake --build '$LLAMA_BUILD' --config Release --target llama-server -j'$jobs'
+    "
 
-echo ""
-echo "-- Verifica GPU Intel --"
+    local server="$LLAMA_BUILD/bin/llama-server"
+    if [[ ! -x "$server" ]]; then
+        warn "Build completata ma llama-server non è stato trovato."
+        return 1
+    fi
 
-# Verifica Level Zero loader
-if [ -f "/usr/lib/libze_loader.so" ] || [ -f "/usr/lib64/libze_loader.so" ]; then
-    echo "  OK Level Zero loader installato"
-else
-    echo "  !  Level Zero loader non trovato"
-    echo "    Installa con: sudo pacman -S level-zero-loader level-zero-headers"
-fi
+    mkdir -p "$VENV_DIR/bin" "$VENV_DIR/lib"
+    install -m755 "$server" "$VENV_DIR/bin/llama-server"
 
-# Verifica Intel Compute Runtime
-if command -v ocloc &>/dev/null; then
-    echo "  OK Intel Compute Runtime installato (ocloc)"
-else
-    echo "  !  Intel Compute Runtime non trovato"
-    echo "    Installa con: sudo pacman -S intel-compute-runtime"
-fi
+    # Mantiene file e symlink SONAME prodotti dalla build shared.
+    local copied=0
+    local library
+    shopt -s nullglob
+    for library in \
+        "$LLAMA_BUILD/bin"/libggml*.so* \
+        "$LLAMA_BUILD/bin"/libllama*.so* \
+        "$LLAMA_BUILD/bin"/libmtmd*.so*
+    do
+        cp -a "$library" "$VENV_DIR/lib/"
+        copied=1
+    done
+    shopt -u nullglob
+    if [[ "$copied" -eq 0 ]]; then
+        warn "Nessuna libreria condivisa llama.cpp copiata; verifica la build."
+    fi
 
-# Verifica GPU Intel via lspci
-if command -v lspci &>/dev/null; then
-    if lspci | grep -q "VGA compatible controller: Intel"; then
-        GPU_NAME=$(lspci | grep "VGA compatible controller: Intel" | head -1)
-        echo "  OK GPU Intel: $GPU_NAME"
+    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$VENV_DIR/bin/llama-server" --version >/dev/null
+
+    # --list-devices è l'interfaccia upstream usata anche dall'app per
+    # verificare che il backend compilato esponga davvero una GPU SYCL.
+    LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$VENV_DIR/bin/llama-server" --list-devices || true
+
+    log "llama-server SYCL installato nel venv"
+    return 0
+}
+
+if ! build_sycl_llama; then
+    if command -v llama-server >/dev/null 2>&1; then
+        log "Uso il llama-server di sistema: $(command -v llama-server)"
     else
-        echo "  i  Nessuna GPU Intel rilevata via lspci"
+        warn "Nessun llama-server disponibile. Su Arch/CachyOS installa 'llama-cpp'; per SYCL usa una build compatibile o rilancia dopo aver installato oneAPI."
     fi
 fi
 
-# ======================================================================
-# FASE 7: Integrazione desktop
-# ======================================================================
+log "Verifica/download modelli GGUF"
+PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python" - <<'PY'
+from core.llama_models import ensure_gguf_models
+paths = ensure_gguf_models()
+for kind, path in paths.items():
+    print(f"  {kind}: {path}")
+PY
 
-echo ""
-echo "-- Integrazione desktop --"
+log "Integrazione desktop utente"
+DESKTOP_DIR="$HOME/.local/share/applications"
+ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
 
-# Crea file .desktop per l'utente
-DESKTOP_FILE="$HOME/.local/share/applications/${APP_ID}.desktop"
-mkdir -p "$(dirname "$DESKTOP_FILE")"
-if [ -f "$SCRIPT_DIR/${APP_ID}.desktop" ]; then
-    cp "$SCRIPT_DIR/${APP_ID}.desktop" "$DESKTOP_FILE"
-    sed -i "s|Exec=glm-ocr|Exec=$VENV_DIR/bin/python $SCRIPT_DIR/main.py|" "$DESKTOP_FILE"
-    echo "  OK File .desktop creato"
-else
-    # Crea file .desktop da zero
-    cat > "$DESKTOP_FILE" << DESKTOP_EOF
+cat > "$DESKTOP_DIR/$APP_ID.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=${APP_NAME}
-Comment=Riconoscimento ottico con motore GLM-OCR (llama.cpp/SYCL/GGUF)
-Exec=${VENV_DIR}/bin/python ${SCRIPT_DIR}/main.py
+Name=GLM OCR
+Comment=Riconoscimento ottico locale con GLM-OCR e llama.cpp
+Exec=$VENV_DIR/bin/python $SCRIPT_DIR/main.py
 Icon=glm-ocr
+Terminal=false
 Categories=Office;Graphics;
 StartupNotify=true
-DESKTOP_EOF
-    echo "  OK File .desktop creato (generato)"
+EOF
+
+if [[ -f "$SCRIPT_DIR/assets/icons/glm-ocr.svg" ]]; then
+    install -m644 "$SCRIPT_DIR/assets/icons/glm-ocr.svg" "$ICON_DIR/glm-ocr.svg"
 fi
+command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
-# Copia icona
-ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
-mkdir -p "$ICON_DIR"
-if [ -f "$SCRIPT_DIR/assets/icons/glm-ocr.svg" ]; then
-    cp "$SCRIPT_DIR/assets/icons/glm-ocr.svg" "$ICON_DIR/"
-    echo "  OK Icona copiata"
-fi
-
-# Aggiorna cache desktop
-update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
-
-# ======================================================================
-# RIEPILOGO
-# ======================================================================
-
-echo ""
-echo "+==================================================+"
-echo "|          Installazione completata!               |"
-echo "+==================================================+"
-echo ""
-echo "  Avvia con:"
-echo "    $VENV_DIR/bin/python $SCRIPT_DIR/main.py"
-echo ""
-echo "  Oppure cerca '${APP_NAME}' nel menu applicazioni."
-echo ""
-echo "  Backend: llama.cpp + SYCL (GPU Intel Arc)"
-echo ""
-echo "  Struttura self-contained:"
-echo "    .venv/bin/llama-server  ← binary SYCL (pacman non lo tocca)"
-echo "    .venv/lib/              ← librerie condivise (libggml-sycl.so, etc.)"
-echo "    .cache/llama.cpp/       ← sorgenti (per ricompilazione futura)"
-echo "    ~/.cache/glm-ocr/       ← modelli GGUF"
-echo ""
-echo "  Per aggiornare llama-server (dopo aggiornamento pacman):"
-echo "    cd $SCRIPT_DIR/.cache/llama.cpp && git pull"
-echo "    rm -rf build && mkdir build && cd build"
-echo "    bash -c 'source /opt/intel/oneapi/setvars.sh && \\"
-echo "      cmake .. -DGGML_SYCL=1 -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx && \\"
-echo "      cmake --build . --config Release -j\$(nproc)'"
-echo "    cp bin/llama-server $VENV_DIR/bin/llama-server"
-echo "    cp bin/libggml-sycl.so* bin/libggml.so* bin/libggml-cpu.so* \\"
-echo "       bin/libggml-base.so* bin/libllama.so* bin/libllama-common.so* \\"
-echo "       bin/libllama-server-impl.so* bin/libmtmd.so* $VENV_DIR/lib/"
+log "Installazione completata"
+printf 'Avvio:\n  %q %q\n' "$VENV_DIR/bin/python" "$SCRIPT_DIR/main.py"
+printf 'llama.cpp pin:\n  %s\n' "$LLAMA_CPP_COMMIT"

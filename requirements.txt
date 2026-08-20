@@ -1,18 +1,9 @@
 PySide6>=6.6.0
 Pillow>=10.0.0
 numpy>=1.26.0
-huggingface_hub
+huggingface_hub>=0.27.0
 PyMuPDF>=1.24.0
-# ═══════════════════════════════════════════════════════════════
-# BACKEND: llama.cpp + SYCL
-# ═══════════════════════════════════════════════════════════════
-# llama-server deve essere installato a livello di sistema:
-#   sudo pacman -S llama.cpp          (CPU-only)
-#   oppure compilato con SYCL:        (GPU Intel Arc)
-#     git clone https://github.com/ggml-org/llama.cpp
-#     cd llama.cpp && mkdir build && cd build
-#     source /opt/intel/oneapi/setvars.sh
-#     cmake .. -DGGML_SYCL=1 -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
-#     cmake --build . --config Release -j$(nproc)
-#     sudo cp build/bin/llama-server /usr/bin/llama-server
-# ═══════════════════════════════════════════════════════════════
+
+# llama-server è un runtime esterno, non un pacchetto Python.
+# Su Arch/CachyOS il pacchetto ufficiale è `llama-cpp`.
+# Per la build SYCL locale e riproducibile usare ./install.sh.

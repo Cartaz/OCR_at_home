@@ -7,10 +7,38 @@ from numpy.typing import NDArray
 from config.constants import AppConstants
 
 
+PREPROCESS_MODES: frozenset[str] = frozenset({"none", "contrast", "resize", "full"})
+
+
 class ImagePreprocessor:
     def enhance(self, image: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        result = self._resize_if_needed(image.copy())
-        return self._enhance_contrast(result)
+        """Production preprocessing: resize-if-needed followed by contrast enhancement."""
+        return self.apply_mode(image, "full")
+
+    def apply_mode(
+        self,
+        image: NDArray[np.uint8],
+        mode: str,
+    ) -> NDArray[np.uint8]:
+        """Apply one explicit preprocessing mode.
+
+        The extra modes are primarily used by the hardware benchmark so resize
+        and contrast can be measured independently. ``full`` is byte-for-byte
+        equivalent to the historical/production ``enhance`` path.
+        """
+        normalized = str(mode).strip().lower()
+        if normalized not in PREPROCESS_MODES:
+            raise ValueError(
+                f"Modalità preprocessing non supportata: {mode!r}; "
+                f"attese {sorted(PREPROCESS_MODES)}"
+            )
+
+        result = image.copy()
+        if normalized in {"resize", "full"}:
+            result = self._resize_if_needed(result)
+        if normalized in {"contrast", "full"}:
+            result = self._enhance_contrast(result)
+        return result
 
     def binarize(self, image: NDArray[np.uint8]) -> NDArray[np.uint8]:
         gray = self._to_grayscale(image) if image.ndim == 3 else image

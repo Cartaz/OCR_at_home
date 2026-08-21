@@ -1,0 +1,8 @@
+# Python/runtime
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local hardware benchmarks may contain private source text and OCR outputs.
+benchmark-results/

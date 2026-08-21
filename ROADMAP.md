@@ -51,7 +51,8 @@ Goal: improve recognition quality using measured evidence rather than intuition.
   - [x] Document the strong repeated-input llama-server cache effect; cached wall-clock timings are not prompt-selection evidence.
   - [x] Add a canonical cache-aware runner with true per-sample prompt-order alternation and accuracy-only decision summaries.
   - [x] Add support for labelled real-world corpora through `manifest.json`.
-  - [ ] Run and review at least one labelled real-world corpus before changing the production default.
+  - [x] Build the canonical three-level real-world suite (digital PDF / dense scanned PDF / handwriting) with exact Markdown ground truth, five-run trimmed means and an automatic `OCR` vs `Text Recognition:` shootout.
+  - [ ] Run and review the canonical labelled real-world suite before changing the production default.
 - [ ] Add explicit OCR modes only when benchmark evidence supports them:
   - Text;
   - Formula;
@@ -120,37 +121,32 @@ Acceptance criteria:
 
 Goal: tune preprocessing and rendering only from measured accuracy/performance data.
 
-- [x] Make pipeline parameters overrideable for benchmarks without changing production defaults.
-  - Production remains preprocessing ON, PDF 150 DPI, max dimension 1920 px and JPEG quality 85.
-- [x] Add a one-factor-at-a-time benchmark suite covering:
-  - preprocessing enabled/disabled;
-  - PDF DPI 100 / 150 / 200 / 300;
-  - maximum image dimension 1280 / 1600 / 1920 / 2560;
-  - JPEG quality 70 / 85 / 95.
-- [x] Add deterministic raster samples plus a labelled two-page vector PDF for DPI testing.
-- [x] Reuse the labelled `manifest.json` corpus format for representative real images/PDFs.
-- [x] Measure OCR quality and pipeline cost together.
-  - CER and worst CER;
-  - end-to-end elapsed time;
-  - PDF render/preprocess time;
-  - llama-server request/timing metadata;
-  - JPEG transfer bytes and sent dimensions;
-  - llama-server `cache_n`.
-- [x] Add `--restart-server-per-config` so latency comparisons can reset repeated-request cache state.
-- [~] Run and review the hardware-backed pipeline benchmark.
-  - [ ] Quick synthetic screening pass.
-  - [ ] Fresh-server-per-config timing/quality pass.
-  - [ ] Review PDF DPI candidates.
-  - [ ] Review preprocessing by document class.
-  - [ ] Review max-dimension trade-off.
-  - [ ] Review JPEG quality/transfer trade-off.
-  - [ ] Validate any winning candidate on representative real documents before changing production defaults.
+- [x] Build benchmark-only pipeline overrides without changing production defaults.
+  - PDF DPI, max image dimension and JPEG quality are independently selectable.
+  - Preprocessing is separable into `none`, `contrast`, `resize` and `full`; `full` remains equivalent to production behavior.
+  - Benchmark requests can explicitly disable llama.cpp prompt caching while production requests preserve their existing payload shape.
+- [x] Build the canonical real-world benchmark protocol.
+  - Three labelled difficulty levels: digital PDF, dense scanned PDF and handwriting.
+  - Five runs per configuration; remove one best/fastest and one worst/slowest metric value and average the middle three.
+  - Rotate document order, use a non-corpus warm-up and fresh app-owned server per configuration by default.
+  - Stage A sweeps one variable at a time.
+  - Stage B advances the five fastest values per variable that remain inside the accuracy quality gate; preprocessing has at most four values.
+  - Stage B evaluates the finalist Cartesian product, with deterministic ordering and production baseline controls at start/end.
+  - CER, WER, character accuracy, end-to-end/request/render/preprocess timing, JPEG bytes, sent dimensions and cache counters are retained.
+  - Emit accuracy/speed/recommended rankings, Pareto frontier, raw outputs, SHA-256 input identity and resumable checkpoints.
+  - `benchmark-results/` is ignored because real OCR output can contain private text.
+- [ ] Execute and review the real-world PDF DPI sweep (including current 150 DPI behavior).
+- [ ] Execute and review preprocessing modes by document class.
+- [ ] Execute and review maximum image dimension sweep.
+- [ ] Execute and review JPEG quality / transfer-cost sweep.
+- [ ] Execute and review the Stage B finalist matrix with five-run trimmed means.
+- [ ] Measure OCR quality and end-to-end latency together on target SYCL hardware.
 - [ ] Change defaults only if results justify the change.
 
 Acceptance criteria:
 - Every tuning change has a recorded benchmark rationale.
-- No production default changes before hardware results are reviewed.
-- Latency decisions use controlled cache state rather than repeated-image cache artifacts.
+- The recommended configuration is the fastest Stage B configuration inside the defined accuracy tolerance of the best measured result, not an arbitrary weighted speed/quality score.
+- Cached requests are not accepted as speed evidence.
 
 ## Phase 6 — End-to-end lifecycle and failure testing
 

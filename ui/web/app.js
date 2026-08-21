@@ -225,12 +225,21 @@ function updateBatchState(path, label) {
     renderBatchFiles();
 }
 
+function ensureLanguageOption(value) {
+    const select = $("#language-input");
+    const normalized = String(value || "ita+eng");
+    if (![...select.options].some((option) => option.value === normalized)) {
+        const option = document.createElement("option");
+        option.value = normalized;
+        option.textContent = normalized;
+        select.append(option);
+    }
+    select.value = normalized;
+}
+
 function applySettings(settings) {
     $("#preprocess-toggle").checked = Boolean(settings.preprocessing_enabled);
-    $("#language-input").value = String(settings.language || "ita+eng");
-    const confidence = Number(settings.confidence_threshold ?? 0.5);
-    $("#confidence-input").value = String(confidence);
-    $("#confidence-output").textContent = confidence.toFixed(2);
+    ensureLanguageOption(settings.language);
     $("#output-dir-input").value = String(settings.output_dir || "");
 }
 
@@ -446,10 +455,6 @@ function bindHandlers() {
     $("#log-refresh-button").addEventListener("click", refreshLogs);
     $("#copy-log-button").addEventListener("click", () => state.backend?.copyText($("#log-output").textContent || ""));
 
-    $("#confidence-input").addEventListener("input", (event) => {
-        $("#confidence-output").textContent = Number(event.target.value).toFixed(2);
-    });
-
     $("#output-dir-button").addEventListener("click", async () => {
         const result = await callNative("chooseOutputDirectory", $("#output-dir-input").value);
         if (result.ok && !result.cancelled) $("#output-dir-input").value = result.path;
@@ -461,7 +466,6 @@ function bindHandlers() {
         const payload = {
             preprocessing_enabled: $("#preprocess-toggle").checked,
             language: $("#language-input").value,
-            confidence_threshold: Number($("#confidence-input").value),
             output_dir: $("#output-dir-input").value,
         };
         const result = await callNative("updateSettings", JSON.stringify(payload));

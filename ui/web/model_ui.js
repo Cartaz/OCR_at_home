@@ -27,6 +27,7 @@
             const chip = $("#backend-chip");
             chip.textContent = "Scaricato";
             chip.classList.remove("active");
+            $("#sidebar-status-text").textContent = "Modello scaricato";
         }
 
         if (state.operation === "model_unloading") {

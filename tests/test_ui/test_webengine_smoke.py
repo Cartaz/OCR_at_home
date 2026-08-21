@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def test_main_web_frontend_loads_offscreen() -> None:
 
 def test_output_settings_module_executes_in_real_webengine() -> None:
     app, window = _load_window()
-    result: list[object] = []
+    result: list[str] = []
     loop = QEventLoop()
     script = """
         (() => {
@@ -59,25 +60,26 @@ def test_output_settings_module_executes_in_real_webengine() -> None:
                 batch_output_format: 'md',
                 batch_save_pdf_pages: true
             });
-            return [
+            return JSON.stringify([
                 document.querySelector('#batch-auto-save-toggle').checked,
                 document.querySelector('#batch-output-format').value,
                 document.querySelector('#batch-pdf-pages-toggle').checked,
                 document.querySelector('#batch-output-format').disabled,
                 document.querySelector('#save-single-pages-txt-button') !== null
-            ];
+            ]);
         })();
     """
 
     def finished(value: object) -> None:
-        result.append(value)
+        result.append(str(value))
         loop.quit()
 
     window.page().runJavaScript(script, finished)
     QTimer.singleShot(3000, loop.quit)
     loop.exec()
 
-    assert result == [[True, "md", True, False, True]]
+    assert len(result) == 1
+    assert json.loads(result[0]) == [True, "md", True, False, True]
     _close_window(window)
     _ = app
 

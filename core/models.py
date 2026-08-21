@@ -45,7 +45,7 @@ class TaskStatus(Enum):
 
 
 class JobStatus(Enum):
-    """Stato di un job batch OCR."""
+    """Stato di un job OCR batch."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -58,21 +58,32 @@ class JobStatus(Enum):
 class OCRResult:
     """Risultato di una singola elaborazione OCR.
 
-    ``pages`` contiene il testo grezzo di ogni pagina quando la sorgente è un
-    PDF; resta vuoto per immagini normali. Il testo combinato rimane in ``text``
-    per compatibilità con il resto del programma.
+    Attributi:
+        text: Testo estratto dall'immagine.
+        confidence: Confidenza reale fornita dal backend, oppure ``None`` quando
+            il backend non espone una misura affidabile. GLM-OCR via llama.cpp
+            attualmente non fornisce questo dato.
+        processing_time_ms: Tempo di elaborazione in millisecondi.
+        device_used: Dispositivo utilizzato.
     """
 
     text: str = ""
     confidence: float | None = None
     processing_time_ms: float = 0.0
     device_used: str = "CPU"
-    pages: list[str] = field(default_factory=list)
 
 
 @dataclass
 class OCRTask:
-    """Task OCR singolo rappresentante un'immagine da elaborare."""
+    """Task OCR singolo rappresentante un'immagine da elaborare.
+
+    Attributi:
+        task_id: Identificativo univoco del task.
+        image_path: Percorso del file immagine.
+        status: Stato corrente del task.
+        result: Risultato OCR, None se non ancora completato.
+        created_at: Timestamp di creazione del task.
+    """
 
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     image_path: Path = field(default_factory=Path)
@@ -83,7 +94,14 @@ class OCRTask:
 
 @dataclass
 class BatchOCRJob:
-    """Job batch contenente più task OCR da elaborare sequenzialmente."""
+    """Job batch contenente più task OCR da elaborare sequenzialmente.
+
+    Attributi:
+        job_id: Identificativo univoco del job.
+        tasks: Lista di task OCR componenti il batch.
+        status: Stato corrente del job.
+        created_at: Timestamp di creazione del job.
+    """
 
     job_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     tasks: list[OCRTask] = field(default_factory=list)
@@ -92,10 +110,12 @@ class BatchOCRJob:
 
     @property
     def completed_count(self) -> int:
+        """Numero di task completati nel batch."""
         return sum(1 for t in self.tasks if t.status == TaskStatus.COMPLETED)
 
     @property
     def total_count(self) -> int:
+        """Numero totale di task nel batch."""
         return len(self.tasks)
 
 

@@ -32,6 +32,7 @@ PROMPT_TABLE_RECOGNITION = "Table Recognition:"
 PROMPT_FORMULA_RECOGNITION = "Formula Recognition:"
 OCR_PROMPT = PROMPT_LEGACY_OCR
 
+PDF_DPI = 150
 MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM
 JPEG_QUALITY = AppConstants.LLAMA_JPEG_QUALITY
 MAX_TOKENS = AppConstants.LLAMA_MAX_TOKENS
@@ -44,6 +45,57 @@ def _check_cancel(token: CancellationToken | None) -> None:
         token.raise_if_cancelled()
 
 
+def _validate_pipeline_options(*, max_image_dim: int, jpeg_quality: int) -> None:
+    if not 256 <= int(max_image_dim) <= 8192:
+        raise ValueError("max_image_dim deve essere compreso tra 256 e 8192")
+    if not 1 <= int(jpeg_quality) <= 100:
+        raise ValueError("jpeg_quality deve essere compreso tra 1 e 100")
+
+
+def _prepare_image_payload(
+    image: Any,
+    *,
+    max_image_dim: int = MAX_IMAGE_DIM,
+    jpeg_quality: int = JPEG_QUALITY,
+) -> tuple[str, dict[str, int]]:
+    """Convert/resize/JPEG-encode one image and return payload diagnostics.
+
+    Production callers use the defaults. Explicit overrides exist so the manual
+    Phase 5 benchmark can evaluate the transfer/quality trade-offs without
+    mutating application-wide constants or persisted settings.
+    """
+    from PIL import Image as PILImage
+
+    _validate_pipeline_options(
+        max_image_dim=max_image_dim,
+        jpeg_quality=jpeg_quality,
+    )
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    source_w, source_h = image.size
+    if max(source_w, source_h) > max_image_dim:
+        scale = max_image_dim / max(source_w, source_h)
+        image = image.resize(
+            (max(1, int(source_w * scale)), max(1, int(source_h * scale))),
+            PILImage.LANCZOS,
+        )
+    sent_w, sent_h = image.size
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=jpeg_quality)
+    encoded = buffer.getvalue()
+    img_b64 = base64.b64encode(encoded).decode("utf-8")
+    return img_b64, {
+        "source_width": int(source_w),
+        "source_height": int(source_h),
+        "sent_width": int(sent_w),
+        "sent_height": int(sent_h),
+        "encoded_bytes": len(encoded),
+        "max_image_dim": int(max_image_dim),
+        "jpeg_quality": int(jpeg_quality),
+    }
+
+
 def ocr_single_image(
     image_path: Path,
     server_url: str,
@@ -51,6 +103,9 @@ def ocr_single_image(
     preprocessing_enabled: bool = True,
     cancel_token: CancellationToken | None = None,
     prompt: str = OCR_PROMPT,
+    max_image_dim: int = MAX_IMAGE_DIM,
+    jpeg_quality: int = JPEG_QUALITY,
+    metrics: dict[str, Any] | None = None,
 ) -> tuple[str, float | None]:
     import numpy as np
 
@@ -64,6 +119,9 @@ def ocr_single_image(
         server_url,
         cancel_token=cancel_token,
         prompt=prompt,
+        max_image_dim=max_image_dim,
+        jpeg_quality=jpeg_quality,
+        metrics=metrics,
     )
 
 
@@ -76,8 +134,19 @@ def ocr_pdf(
     emit_events: bool = True,
     event_mode: str = "single",
     prompt: str = OCR_PROMPT,
+    pdf_dpi: int = PDF_DPI,
+    max_image_dim: int = MAX_IMAGE_DIM,
+    jpeg_quality: int = JPEG_QUALITY,
+    page_metrics: list[dict[str, Any]] | None = None,
 ) -> tuple[str, float | None]:
     import numpy as np
+
+    if not 72 <= int(pdf_dpi) <= 600:
+        raise ValueError("pdf_dpi deve essere compreso tra 72 e 600")
+    _validate_pipeline_options(
+        max_image_dim=max_image_dim,
+        jpeg_quality=jpeg_quality,
+    )
 
     total_pages = pdf_page_count(pdf_path)
     if total_pages == 0:
@@ -97,21 +166,37 @@ def ocr_pdf(
                 },
             )
 
-        page_image = pdf_page_to_image(pdf_path, page_num, dpi=150)
+        render_started = time.perf_counter()
+        page_image = pdf_page_to_image(pdf_path, page_num, dpi=pdf_dpi)
+        render_elapsed_s = time.perf_counter() - render_started
         _check_cancel(cancel_token)
+        preprocess_started = time.perf_counter()
         if preprocessing_enabled:
             image = array_to_pil(_preprocessor.enhance(np.array(page_image)))
             del page_image
         else:
             image = page_image
+        preprocess_elapsed_s = time.perf_counter() - preprocess_started
         gc.collect()
 
+        metrics: dict[str, Any] = {
+            "page_num": page_num,
+            "pdf_dpi": int(pdf_dpi),
+            "render_elapsed_s": render_elapsed_s,
+            "preprocessing_enabled": bool(preprocessing_enabled),
+            "preprocess_elapsed_s": preprocess_elapsed_s,
+        }
         text, _confidence = ocr_image_api(
             image,
             server_url,
             cancel_token=cancel_token,
             prompt=prompt,
+            max_image_dim=max_image_dim,
+            jpeg_quality=jpeg_quality,
+            metrics=metrics,
         )
+        if page_metrics is not None:
+            page_metrics.append(metrics)
         del image
         gc.collect()
         _check_cancel(cancel_token)
@@ -141,20 +226,19 @@ def ocr_image_api(
     *,
     cancel_token: CancellationToken | None = None,
     prompt: str = OCR_PROMPT,
+    max_image_dim: int = MAX_IMAGE_DIM,
+    jpeg_quality: int = JPEG_QUALITY,
+    metrics: dict[str, Any] | None = None,
 ) -> tuple[str, float | None]:
-    from PIL import Image as PILImage
-
     _check_cancel(cancel_token)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    w, h = image.size
-    if max(w, h) > MAX_IMAGE_DIM:
-        scale = MAX_IMAGE_DIM / max(w, h)
-        image = image.resize((int(w * scale), int(h * scale)), PILImage.LANCZOS)
+    img_b64, payload_metrics = _prepare_image_payload(
+        image,
+        max_image_dim=max_image_dim,
+        jpeg_quality=jpeg_quality,
+    )
+    if metrics is not None:
+        metrics.update(payload_metrics)
 
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=JPEG_QUALITY)
-    img_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
     payload = {
         "messages": [
             {
@@ -255,6 +339,23 @@ def ocr_image_api(
 
     accounted = (predicted_ms + prompt_ms) / 1000.0
     other_s = max(0.0, elapsed - accounted)
+
+    if metrics is not None:
+        metrics.update(
+            {
+                "request_elapsed_s": elapsed,
+                "completion_tokens": completion_tokens,
+                "prompt_tokens": prompt_tokens,
+                "predicted_n": predicted_n,
+                "prompt_n": prompt_n,
+                "cache_n": cache_n,
+                "predicted_ms": predicted_ms,
+                "prompt_ms": prompt_ms,
+                "predicted_tps": predicted_tps,
+                "prompt_tps": prompt_tps,
+                "other_s": other_s,
+            }
+        )
 
     if timings:
         logger.info(

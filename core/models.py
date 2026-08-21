@@ -45,7 +45,7 @@ class TaskStatus(Enum):
 
 
 class JobStatus(Enum):
-    """Stato di un job OCR batch."""
+    """Stato di un job batch OCR."""
 
     PENDING = "pending"
     RUNNING = "running"

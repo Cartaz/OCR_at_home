@@ -108,7 +108,8 @@ Goal: let the user reclaim RAM/VRAM without quitting the application.
 - [x] Keep unload/reload on worker threads so Qt WebEngine remains responsive.
 - [x] Preserve app-owned process semantics: no global `pkill` and no changes to the existing process-group termination logic in `LlamaServerBackend`.
 - [x] Cover settings, controller coordination, queued reload behavior, explicit/idle unload and real WebEngine model-memory controls in CI.
-- [ ] Validate on real SYCL hardware that unload releases RAM/VRAM and removes the app-owned `llama-server` PID; then revalidate automatic reload and final exit.
+- [x] Validate on real SYCL hardware that unload releases RAM/VRAM and removes the app-owned `llama-server` PID; then revalidate automatic reload and final exit.
+  - Hardware validation completed successfully on 2026-08-21.
 
 Acceptance criteria:
 - RAM/VRAM is released after unload.
@@ -133,16 +134,25 @@ Acceptance criteria:
 
 Goal: prevent regressions around the external runtime and long-running operations.
 
-- [ ] Add a fake `llama-server` process fixture for lifecycle tests.
-- [ ] Cover startup -> ready -> shutdown.
-- [ ] Cover window close, UI quit, SIGINT and SIGTERM.
-- [ ] Cover cancellation during model loading.
-- [ ] Cover server crash and retry behavior.
-- [ ] Assert no orphan child/process group remains.
-- [ ] Cover cancellation during single OCR and batch OCR.
+- [x] Add a fake `llama-server` process fixture for lifecycle tests.
+  - Uses a real local HTTP subprocess so CI exercises production `Popen`, health-check and process-group teardown logic without SYCL/GGUF inference.
+- [x] Cover startup -> ready -> shutdown.
+- [x] Cover window close, UI quit, SIGINT and SIGTERM.
+  - Existing window/quit wiring regressions plus explicit SIGINT/SIGTERM handler tests cover all desktop exit routes.
+- [x] Cover cancellation during model loading.
+  - Cancellation closes the owned process while startup is still waiting for health readiness.
+- [x] Cover server crash and retry behavior.
+  - A simulated connection reset kills the first server and verifies exactly one successful restart/retry.
+- [x] Assert no orphan child/process group remains.
+  - The fake server spawns a child in its session; shutdown must remove both PIDs and the process group.
+- [x] Cover cancellation during single OCR and batch OCR.
+  - Cooperative tokens are exercised through the real controller worker and ProcessManager paths until the operation returns to `idle`.
+- [x] Verify shutdown remains idempotent after an already-crashed server.
 
 Acceptance criteria:
 - Process lifecycle behavior is testable in CI without real SYCL hardware.
+- The same app-owned process-group semantics used in production are exercised by CI.
+- Full CI green.
 
 ## Phase 7 — Daily-use UX
 
@@ -182,7 +192,7 @@ Acceptance criteria:
 2. Phase 2 prompt/quality benchmark.
 3. Phase 3 output workflow.
 4. Phase 4 model memory management.
-5. Phase 6 lifecycle tests (some tests may be pulled forward when relevant).
+5. Phase 6 lifecycle tests.
 6. Phase 5 pipeline tuning.
 7. Phase 7 UX.
 8. Phase 8 repository/release maintenance continuously as needed.

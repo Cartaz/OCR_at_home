@@ -14,7 +14,7 @@ Use exactly three representative documents:
 
 Provide one Markdown ground-truth file using the exact structure in `realworld-ground-truth-template.md`:
 
-```markdown
+````markdown
 # FACILE
 
 ```text
@@ -32,7 +32,7 @@ exact transcription...
 ```text
 exact transcription...
 ```
-```
+````
 
 The parser is intentionally strict. The benchmark aborts if any section is missing or empty. Application-added `--- Pagina N ---` markers are removed before scoring; other OCR formatting remains part of the evaluated output.
 
@@ -57,7 +57,7 @@ The non-interactive equivalent is:
   --no-dialog
 ```
 
-Before inference the script prints the maximum number of OCR requests. Use `--plan-only` to validate inputs and inspect the plan without starting `llama-server`.
+Before inference the script prints the maximum benchmark plan. Use `--plan-only` to validate inputs and inspect the plan without starting `llama-server`.
 
 ## Statistical protocol
 
@@ -88,7 +88,7 @@ That chosen prompt is frozen for Stage A and Stage B, so the large pipeline matr
 
 ## Stage A — one factor at a time
 
-Starting from the production baseline, the suite sweeps one variable at a time:
+Starting from the production baseline, the suite sweeps one variable at a time. Each value is compared using the same affected-document workload; in particular the current 150-DPI reference is measured on the same PDF-only workload as the other DPI candidates.
 
 ### PDF DPI
 

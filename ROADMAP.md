@@ -95,16 +95,25 @@ Acceptance criteria:
 
 Goal: let the user reclaim RAM/VRAM without quitting the application.
 
-- [ ] Add `Unload model` / `Stop backend` action.
-- [ ] Keep the UI alive after unloading.
-- [ ] Allow explicit reload and safe automatic reload before OCR.
-- [ ] Evaluate an optional `Load model at startup` setting.
-- [ ] Evaluate optional idle auto-unload after a configurable interval.
-- [ ] Ensure every unload/reload path owns and terminates only the app-created `llama-server` process group.
+- [x] Add `Unload model` / `Stop backend` action.
+- [x] Keep the UI alive after unloading.
+- [x] Allow explicit reload and safe automatic reload before OCR/batch.
+  - At most one user operation can wait for model loading at a time.
+  - Cancelling/failing model load clears the queued operation.
+- [x] Add optional `Load model at startup` setting.
+  - Default remains enabled to preserve existing behavior after upgrade.
+- [x] Add optional idle auto-unload after a configurable interval.
+  - Default is disabled.
+  - The idle clock restarts when the backend returns to idle.
+- [x] Keep unload/reload on worker threads so Qt WebEngine remains responsive.
+- [x] Preserve app-owned process semantics: no global `pkill` and no changes to the existing process-group termination logic in `LlamaServerBackend`.
+- [x] Cover settings, controller coordination, queued reload behavior, explicit/idle unload and real WebEngine model-memory controls in CI.
+- [ ] Validate on real SYCL hardware that unload releases RAM/VRAM and removes the app-owned `llama-server` PID; then revalidate automatic reload and final exit.
 
 Acceptance criteria:
 - RAM/VRAM is released after unload.
-- No orphan `llama-server` remains after unload, reload, cancellation or exit.
+- No orphan app-owned `llama-server` remains after unload, reload, cancellation or exit.
+- The UI remains usable while the model is unloaded and a new OCR transparently reloads it.
 
 ## Phase 5 — Image/PDF pipeline benchmarking
 

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 OP_IDLE = "idle"
 OP_MODEL_LOADING = "model_loading"
+OP_MODEL_UNLOADING = "model_unloading"
 OP_OCR = "ocr"
 OP_BATCH = "batch"
 OP_SHUTTING_DOWN = "shutting_down"
@@ -104,7 +105,7 @@ class _OCRWorker:
 
 
 class AppController:
-    """Coordina model loading, OCR, batch e shutdown come operazioni esclusive."""
+    """Coordina model loading, OCR, batch, unload e shutdown come operazioni esclusive."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -177,7 +178,7 @@ class AppController:
         EventBus.emit("model_loading", {"device": device})
 
     def initialize(self) -> None:
-        """Rileva l'hardware e richiede il caricamento iniziale del modello."""
+        """Rileva l'hardware e, se configurato, richiede il model load iniziale."""
         if self._initialized:
             return
 
@@ -195,18 +196,19 @@ class AppController:
                 self._settings = self._settings.with_(default_device=default_device)
                 self._settings.save()
             else:
-                # Nessun backend è realmente utilizzabile: non trasformare una
-                # preferenza valida (es. llama-cpp-sycl) in un altro device che
-                # è comunque indisponibile. Il model-load produrrà l'errore
-                # corretto per il device configurato e, dopo l'installazione del
-                # backend, la preferenza dell'utente resterà intatta.
                 logger.warning(
                     "Nessun backend llama.cpp disponibile; mantengo device configurato=%s",
                     default_device,
                 )
 
         self._initialized = True
-        self._prepare_model_load(default_device)
+        if self._settings.load_model_at_startup:
+            self._prepare_model_load(default_device)
+        else:
+            EventBus.emit(
+                "model_unloaded",
+                {"device": default_device, "reason": "startup_disabled"},
+            )
 
     def request_model_load(self, device: str) -> None:
         """Richiede un model load senza modificare le impostazioni."""
@@ -241,6 +243,37 @@ class AppController:
                 if self._model_load_token is token:
                     self._model_load_token = None
             self._finish_operation(OP_MODEL_LOADING)
+
+    def request_model_unload(self) -> None:
+        """Richiede lo scaricamento del modello senza bloccare il chiamante UI."""
+        if not self._engine.is_initialized:
+            EventBus.emit(
+                "model_unloaded",
+                {"device": self._settings.default_device, "reason": "already_unloaded"},
+            )
+            return
+        self._begin_operation(OP_MODEL_UNLOADING)
+        EventBus.emit(
+            "model_unloading",
+            {"device": self._engine.device},
+        )
+
+    def unload_model_sync(self) -> None:
+        """Rilascia il backend nel thread chiamante preservando la UI/controller."""
+        active = self.operation
+        if active == OP_IDLE:
+            self._begin_operation(OP_MODEL_UNLOADING)
+        elif active != OP_MODEL_UNLOADING:
+            raise OperationBusyError(active)
+
+        try:
+            self._engine.shutdown()
+            EventBus.emit(
+                "model_unloaded",
+                {"device": self._settings.default_device, "reason": "requested"},
+            )
+        finally:
+            self._finish_operation(OP_MODEL_UNLOADING)
 
     def run_ocr(self, image_path: Path) -> OCRResult:
         """API sincrona usata soprattutto da test e integrazioni."""
@@ -359,8 +392,6 @@ class AppController:
             self._settings = self._settings.with_(default_device=device_type)
             self._settings.save()
             EventBus.emit("config_changed", {"default_device": device_type})
-            # OCREngine.initialize() sostituirà il backend nel QThread di load:
-            # nessun terminate/wait deve bloccare il thread GUI.
             EventBus.emit("model_loading", {"device": device_type})
         except Exception:
             with self._operation_lock:
@@ -397,8 +428,6 @@ class AppController:
         if ocr_thread is not None and ocr_thread.is_alive():
             ocr_thread.join(timeout=15)
 
-        # Se il model-load worker è ancora dentro initialize(), il token sopra
-        # ne interrompe startup/I/O e questo lock attende una chiusura coerente.
         self._engine.shutdown()
         self._initialized = False
 

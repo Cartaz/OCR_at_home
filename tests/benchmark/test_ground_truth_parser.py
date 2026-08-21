@@ -15,6 +15,10 @@ def test_plain_markdown_ground_truth_accepts_internal_headings() -> None:
 ## [1.0.1] — Pulizia e bug fix
 - Riga esatta del documento.
 
+```python
+print("questo blocco fa parte della trascrizione")
+```
+
 # MEDIO
 
 Testo della scansione densa.
@@ -37,6 +41,7 @@ Terza parte dello stesso testo.
 
     assert "# Changelog" in truth.facile
     assert "## [1.0.1]" in truth.facile
+    assert 'print("questo blocco fa parte della trascrizione")' in truth.facile
     assert truth.medio == "Testo della scansione densa."
     assert truth.difficile_segments == {
         "maiuscolo": "PRIMA PARTE DEL TESTO CONTINUO.",

@@ -22,7 +22,16 @@ from core.image_preprocessor import ImagePreprocessor
 from core.image_utils import array_to_pil, load_image, pdf_page_count, pdf_page_to_image
 
 logger = logging.getLogger(__name__)
-OCR_PROMPT = "OCR"
+
+# Keep the existing production default unchanged until the prompt benchmark has
+# been run on the target SYCL hardware. The task-specific values below are the
+# prompts defined by the official zai-org/GLM-OCR pipeline/training examples.
+PROMPT_LEGACY_OCR = "OCR"
+PROMPT_TEXT_RECOGNITION = "Text Recognition:"
+PROMPT_TABLE_RECOGNITION = "Table Recognition:"
+PROMPT_FORMULA_RECOGNITION = "Formula Recognition:"
+OCR_PROMPT = PROMPT_LEGACY_OCR
+
 MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM
 JPEG_QUALITY = AppConstants.LLAMA_JPEG_QUALITY
 MAX_TOKENS = AppConstants.LLAMA_MAX_TOKENS
@@ -41,6 +50,7 @@ def ocr_single_image(
     *,
     preprocessing_enabled: bool = True,
     cancel_token: CancellationToken | None = None,
+    prompt: str = OCR_PROMPT,
 ) -> tuple[str, float | None]:
     import numpy as np
 
@@ -49,7 +59,12 @@ def ocr_single_image(
     if preprocessing_enabled:
         image = array_to_pil(_preprocessor.enhance(np.array(image)))
     _check_cancel(cancel_token)
-    return ocr_image_api(image, server_url, cancel_token=cancel_token)
+    return ocr_image_api(
+        image,
+        server_url,
+        cancel_token=cancel_token,
+        prompt=prompt,
+    )
 
 
 def ocr_pdf(
@@ -60,6 +75,7 @@ def ocr_pdf(
     cancel_token: CancellationToken | None = None,
     emit_events: bool = True,
     event_mode: str = "single",
+    prompt: str = OCR_PROMPT,
 ) -> tuple[str, float | None]:
     import numpy as np
 
@@ -94,6 +110,7 @@ def ocr_pdf(
             image,
             server_url,
             cancel_token=cancel_token,
+            prompt=prompt,
         )
         del image
         gc.collect()
@@ -123,6 +140,7 @@ def ocr_image_api(
     server_url: str,
     *,
     cancel_token: CancellationToken | None = None,
+    prompt: str = OCR_PROMPT,
 ) -> tuple[str, float | None]:
     from PIL import Image as PILImage
 
@@ -146,7 +164,7 @@ def ocr_image_api(
                         "type": "image_url",
                         "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
                     },
-                    {"type": "text", "text": OCR_PROMPT},
+                    {"type": "text", "text": str(prompt)},
                 ],
             }
         ],

@@ -17,8 +17,8 @@ from config.constants import AppMeta
 from config.settings import Settings
 from config.theme import ThemeColors
 from core.app_controller import AppController
+from ui.responsive_web_bridge import ResponsiveWebBridge
 from ui.tray_icon import TrayIcon
-from ui.web_bridge import WebBridge
 from ui.window import MainWindow
 
 _controller_ref: list[AppController | None] = [None]
@@ -116,6 +116,7 @@ def main() -> None:
 
     web_root = Path(__file__).parent / "ui" / "web"
     index_path = web_root / "index.html"
+    settings_ui_path = web_root / "settings_ui.js"
     if not index_path.is_file():
         logger.error("Frontend HTML mancante: %s", index_path)
         raise SystemExit(1)
@@ -131,7 +132,7 @@ def main() -> None:
         app.setWindowIcon(icon)
         window.setWindowIcon(icon)
 
-    bridge = WebBridge(controller, window=window, parent=window)
+    bridge = ResponsiveWebBridge(controller, window=window, parent=window)
     channel = QWebChannel(window.page())
     channel.registerObject("backend", bridge)
     window.page().setWebChannel(channel)
@@ -151,14 +152,24 @@ def main() -> None:
         window.hide_on_close = False
 
     app.aboutToQuit.connect(bridge.shutdown)
+    ui_ready_logged = False
 
     def on_load_finished(ok: bool) -> None:
+        nonlocal ui_ready_logged
         if not ok:
             logger.error("Impossibile caricare il frontend HTML: %s", index_path)
+            return
+        if settings_ui_path.is_file():
+            try:
+                window.page().runJavaScript(settings_ui_path.read_text(encoding="utf-8"))
+            except OSError:
+                logger.exception("Impossibile applicare gli affinamenti UI")
+        if not ui_ready_logged:
+            logger.info("GLM OCR UI pronta")
+            ui_ready_logged = True
 
     window.loadFinished.connect(on_load_finished)
     window.show()
-    logger.info("GLM OCR UI pronta")
     raise SystemExit(app.exec())
 
 

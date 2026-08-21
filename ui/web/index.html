@@ -6,6 +6,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' qrc: data:; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' qrc:;">
     <title>GLM OCR</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="settings.css">
     <script src="qrc:///qtwebchannel/qwebchannel.js" defer></script>
     <script src="app.js" defer></script>
 </head>
@@ -269,19 +270,15 @@
 
                             <div class="form-field">
                                 <label class="field-label" for="language-input">Lingua OCR configurata</label>
-                                <div class="inset-field text-field">
-                                    <input id="language-input" type="text" autocomplete="off" spellcheck="false">
+                                <div class="inset-field text-field language-select-field">
+                                    <select id="language-input" name="language" aria-label="Lingua OCR configurata">
+                                        <option value="ita">Italiano</option>
+                                        <option value="eng">English</option>
+                                        <option value="ita+eng">Italiano + English</option>
+                                    </select>
+                                    <span class="select-chevron" aria-hidden="true">⌄</span>
                                 </div>
-                                <p class="field-help">Preferenza persistente; il prompt GLM-OCR attuale resta neutro.</p>
-                            </div>
-
-                            <div class="form-field">
-                                <label class="field-label" for="confidence-input">Soglia confidenza</label>
-                                <div class="range-row">
-                                    <input id="confidence-input" type="range" min="0" max="1" step="0.05">
-                                    <output id="confidence-output" for="confidence-input">0.50</output>
-                                </div>
-                                <p class="field-help">Valore persistente disponibile alle integrazioni; non filtra automaticamente il testo.</p>
+                                <p class="field-help">Preferenza salvata per compatibilità; il prompt GLM-OCR attuale resta neutro e non forza la lingua.</p>
                             </div>
 
                             <div class="form-field">

@@ -116,7 +116,6 @@ def main() -> None:
 
     web_root = Path(__file__).parent / "ui" / "web"
     index_path = web_root / "index.html"
-    settings_ui_path = web_root / "settings_ui.js"
     if not index_path.is_file():
         logger.error("Frontend HTML mancante: %s", index_path)
         raise SystemExit(1)
@@ -161,13 +160,6 @@ def main() -> None:
         if not ok:
             logger.error("Impossibile caricare il frontend HTML: %s", index_path)
             return
-        if settings_ui_path.is_file():
-            try:
-                window.page().runJavaScript(
-                    settings_ui_path.read_text(encoding="utf-8")
-                )
-            except OSError:
-                logger.exception("Impossibile applicare gli affinamenti UI")
         if not ui_ready_logged:
             logger.info("GLM OCR UI pronta")
             ui_ready_logged = True

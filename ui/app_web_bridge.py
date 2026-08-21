@@ -29,10 +29,20 @@ class AppWebBridge(WebBridge):
         self._single_pdf_pages: dict[str, dict[int, str]] = {}
         self._batch_saved_count = 0
         self._batch_save_failures = 0
+        self._batch_output_snapshot: dict[str, Any] = {}
 
     @staticmethod
     def _canonical_source(source_path: str) -> str:
         return str(Path(source_path).expanduser().resolve()) if source_path else ""
+
+    def _snapshot_batch_output(self) -> None:
+        settings = self._controller.settings
+        self._batch_output_snapshot = {
+            "enabled": settings.batch_auto_save,
+            "format": settings.batch_output_format,
+            "pdf_pages": settings.batch_save_pdf_pages,
+            "output_dir": settings.output_dir,
+        }
 
     @Slot(str, object)
     def _on_core_event(self, event_name: str, payload: object) -> None:
@@ -59,6 +69,7 @@ class AppWebBridge(WebBridge):
         elif event_name == "batch_started":
             self._batch_saved_count = 0
             self._batch_save_failures = 0
+            self._snapshot_batch_output()
 
         # Publish the core event first so the normal UI state is current before
         # any output-status event is emitted.
@@ -66,15 +77,18 @@ class AppWebBridge(WebBridge):
 
         if event_name == "batch_task_completed":
             self._auto_save_batch_result(data)
-        elif event_name == "batch_completed" and self._controller.settings.batch_auto_save:
+        elif event_name == "batch_completed" and self._batch_output_snapshot.get("enabled"):
             self._publish(
                 "batch_output_summary",
                 {
                     "saved": self._batch_saved_count,
                     "failed": self._batch_save_failures,
-                    "output_dir": self._controller.settings.output_dir,
+                    "output_dir": self._batch_output_snapshot.get("output_dir", ""),
                 },
             )
+            self._batch_output_snapshot = {}
+        elif event_name in {"batch_cancelled", "batch_failed"}:
+            self._batch_output_snapshot = {}
 
     def _require_completed_single(self, source_path: str) -> str:
         source = self._canonical_source(source_path)
@@ -85,8 +99,8 @@ class AppWebBridge(WebBridge):
         return source
 
     def _auto_save_batch_result(self, data: dict[str, Any]) -> None:
-        settings = self._controller.settings
-        if not settings.batch_auto_save:
+        options = self._batch_output_snapshot
+        if not options.get("enabled"):
             return
 
         source = str(data.get("image_path") or "")
@@ -103,18 +117,18 @@ class AppWebBridge(WebBridge):
         page_paths: list[Path] = []
         try:
             combined_path = write_ocr_text(
-                settings.output_dir,
+                str(options["output_dir"]),
                 source,
                 text,
-                settings.batch_output_format,
+                str(options["format"]),
             )
-            if settings.batch_save_pdf_pages and Path(source).suffix.lower() == ".pdf":
+            if options.get("pdf_pages") and Path(source).suffix.lower() == ".pdf":
                 pages = split_combined_pdf_text(text)
                 page_paths = write_ocr_pages(
-                    settings.output_dir,
+                    str(options["output_dir"]),
                     source,
                     pages,
-                    settings.batch_output_format,
+                    str(options["format"]),
                 )
             self._batch_saved_count += 1
             logger.info("Output batch salvato per %s in %s", source, combined_path)

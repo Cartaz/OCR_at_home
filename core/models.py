@@ -110,18 +110,33 @@ class BatchOCRJob:
 
     @property
     def completed_count(self) -> int:
-        """Numero di task completati nel batch."""
+        """Numero di task completati nel batch.
+
+        Returns:
+            Conteggio dei task con stato COMPLETED.
+        """
         return sum(1 for t in self.tasks if t.status == TaskStatus.COMPLETED)
 
     @property
     def total_count(self) -> int:
-        """Numero totale di task nel batch."""
+        """Numero totale di task nel batch.
+
+        Returns:
+            Conteggio totale di task.
+        """
         return len(self.tasks)
 
 
 @dataclass
 class HardwareInfo:
-    """Informazioni su un dispositivo hardware per l'inferenza."""
+    """Informazioni su un dispositivo hardware per l'inferenza.
+
+    Attributi:
+        device_name: Nome visualizzato del dispositivo.
+        device_type: Tipo di dispositivo.
+        available: Se il dispositivo è disponibile e utilizzabile.
+        memory_mb: Memoria disponibile in megabyte.
+    """
 
     device_name: str = ""
     device_type: str = "CPU"

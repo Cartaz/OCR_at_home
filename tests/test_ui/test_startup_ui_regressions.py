@@ -7,7 +7,9 @@ WEB = ROOT / "ui" / "web"
 
 def test_main_uses_consolidated_non_blocking_web_bridge() -> None:
     text = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "from ui.web_bridge import WebBridge" in text
+    assert "from ui.app_web_bridge import AppWebBridge" in text
+    assert "bridge = AppWebBridge(" in text
+    assert 'channel.registerObject("backend", bridge)' in text
     assert "ResponsiveWebBridge" not in text
     assert "settings_ui.js" not in text
     assert "runJavaScript" not in text
@@ -46,3 +48,17 @@ def test_language_selector_is_native_html_and_confidence_control_is_removed() ->
     assert "rgb(20, 20, 20)" in css
     assert "rgb(255, 102, 0)" in css
     assert not (WEB / "settings_ui.js").exists()
+
+
+def test_single_result_save_controls_use_real_backend_action() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
+    bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
+
+    assert 'src="save_ui.js"' in html
+    assert 'id="save-single-txt-button"' in html
+    assert 'id="save-single-md-button"' in html
+    assert "saveSingleResult" in save_js
+    assert "resultSourcePath === state.singlePath" in save_js
+    assert "def saveSingleResult" in bridge
+    assert "write_ocr_text" in bridge

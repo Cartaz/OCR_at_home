@@ -17,7 +17,12 @@ _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 def safe_source_stem(source_path: str | Path) -> str:
     """Return a portable filename stem derived from the source document."""
-    stem = Path(source_path).stem.strip().strip(".")
+    source = Path(source_path)
+    name = source.name.strip()
+    if name.startswith(".") and name.count(".") == 1:
+        stem = ""
+    else:
+        stem = source.stem.strip().strip(".")
     stem = _INVALID_FILENAME_CHARS.sub("_", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
     return stem or "ocr-result"
@@ -36,8 +41,8 @@ def write_ocr_text(
 ) -> Path:
     """Atomically publish OCR text without ever overwriting an existing file.
 
-    On POSIX, the complete temporary file is hard-linked into place. ``os.link``
-    is atomic and fails if the destination already exists, so a concurrent writer
+    The complete temporary file is hard-linked into place. ``os.link`` is
+    atomic and fails if the destination already exists, so a concurrent writer
     cannot be overwritten. The temporary name is removed after publication.
     """
     fmt = str(file_format).strip().lower().lstrip(".")

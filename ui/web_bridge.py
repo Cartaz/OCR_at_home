@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Slot, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
@@ -28,7 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 class WebBridge(QObject):
-    """Thin presentation bridge; all OCR/business logic remains in Python core."""
+    """Thin presentation bridge; all OCR/business logic remains in Python core.
+
+    Bootstrap and controller initialization are intentionally separated: the
+    bootstrap path returns only already-known state, while hardware detection
+    and model startup run on a worker so Qt WebEngine can present its first
+    frame immediately.
+    """
 
     event = Signal(str)
 
@@ -45,6 +51,9 @@ class WebBridge(QObject):
         self._events.event_received.connect(self._on_core_event)
         self._model_thread: threading.Thread | None = None
         self._model_thread_lock = threading.Lock()
+        self._init_thread: threading.Thread | None = None
+        self._init_thread_lock = threading.Lock()
+        self._devices_snapshot: list[dict[str, Any]] = []
         self._shutdown = False
 
     def set_window(self, window: QWidget) -> None:
@@ -55,7 +64,17 @@ class WebBridge(QObject):
         return json.dumps(data, ensure_ascii=False, default=str)
 
     def _publish(self, event_name: str, payload: dict[str, Any] | None = None) -> None:
-        self.event.emit(self._json({"type": event_name, "payload": payload or {}}))
+        # Unknown/unsupported optional values must be absent rather than exposed
+        # as misleading null/zero semantics in JavaScript. This is especially
+        # important for OCR confidence, which GLM-OCR currently does not report.
+        clean_payload = {
+            key: value
+            for key, value in (payload or {}).items()
+            if value is not None
+        }
+        self.event.emit(
+            self._json({"type": event_name, "payload": clean_payload})
+        )
 
     def _error(self, message: str, *, details: str = "") -> None:
         self._publish("ui_error", {"message": message, "details": details})
@@ -63,9 +82,17 @@ class WebBridge(QObject):
     @Slot(str, object)
     def _on_core_event(self, event_name: str, payload: object) -> None:
         data = dict(payload) if isinstance(payload, dict) else {}
+        if event_name == "hardware_detected":
+            devices = data.get("devices")
+            if isinstance(devices, list):
+                self._devices_snapshot = [
+                    dict(item) for item in devices if isinstance(item, dict)
+                ]
         self._publish(event_name, data)
         if event_name == "model_loading":
-            device = str(data.get("device") or self._controller.settings.default_device)
+            device = str(
+                data.get("device") or self._controller.settings.default_device
+            )
             self._start_model_worker(device)
 
     def _start_model_worker(self, device: str) -> None:
@@ -118,6 +145,7 @@ class WebBridge(QObject):
         ]
 
     def _bootstrap_payload(self) -> dict[str, Any]:
+        """Return already-available UI state without probing hardware."""
         settings = asdict(self._controller.settings)
         return {
             "app": {
@@ -133,7 +161,7 @@ class WebBridge(QObject):
                 "backend": self._controller.engine.backend,
                 "active_batch_id": self._controller.process_manager.active_job_id,
             },
-            "devices": self._device_dicts(),
+            "devices": list(self._devices_snapshot),
             "limits": {
                 "max_batch_size": AppMeta.MAX_BATCH_SIZE,
                 "max_image_size_mb": AppMeta.MAX_IMAGE_SIZE_MB,
@@ -155,16 +183,35 @@ class WebBridge(QObject):
 
     @Slot()
     def initializeBackend(self) -> None:
-        try:
-            self._controller.initialize()
-            if (
-                self._controller.operation == OP_MODEL_LOADING
-                and not self._controller.engine.is_initialized
-            ):
-                self._start_model_worker(self._controller.settings.default_device)
-        except Exception as exc:
-            logger.exception("Inizializzazione controller fallita")
-            self._error("Impossibile inizializzare il backend OCR.", details=str(exc))
+        """Initialize detection/controller off the Qt GUI thread."""
+        with self._init_thread_lock:
+            if self._shutdown:
+                return
+            if self._init_thread is not None and self._init_thread.is_alive():
+                return
+
+            def initialize() -> None:
+                try:
+                    self._controller.initialize()
+                except Exception as exc:
+                    logger.exception("Inizializzazione controller fallita")
+                    if not self._shutdown:
+                        self._error(
+                            "Impossibile inizializzare il backend OCR.",
+                            details=str(exc),
+                        )
+                finally:
+                    with self._init_thread_lock:
+                        if self._init_thread is threading.current_thread():
+                            self._init_thread = None
+
+            thread = threading.Thread(
+                target=initialize,
+                name="backend-init-worker",
+                daemon=True,
+            )
+            self._init_thread = thread
+            thread.start()
 
     @staticmethod
     def _dialog_filter() -> str:
@@ -179,7 +226,9 @@ class WebBridge(QObject):
         if not path.is_file():
             raise ValueError(f"File non trovato: {path}")
         if path.suffix.lower() not in AppMeta.SUPPORTED_IMAGE_EXTENSIONS:
-            raise ValueError(f"Formato non supportato: {path.suffix or '(senza estensione)'}")
+            raise ValueError(
+                f"Formato non supportato: {path.suffix or '(senza estensione)'}"
+            )
         max_bytes = AppMeta.MAX_IMAGE_SIZE_MB * 1024 * 1024
         if path.stat().st_size > max_bytes:
             raise ValueError(
@@ -200,7 +249,12 @@ class WebBridge(QObject):
         try:
             valid = self._validate_path(path)
             return self._json(
-                {"ok": True, "cancelled": False, "path": str(valid), "name": valid.name}
+                {
+                    "ok": True,
+                    "cancelled": False,
+                    "path": str(valid),
+                    "name": valid.name,
+                }
             )
         except Exception as exc:
             return self._json({"ok": False, "error": str(exc)})
@@ -248,7 +302,9 @@ class WebBridge(QObject):
             if not raw_paths:
                 raise ValueError("Seleziona almeno un file")
             if len(raw_paths) > AppMeta.MAX_BATCH_SIZE:
-                raise ValueError(f"Massimo {AppMeta.MAX_BATCH_SIZE} file per batch")
+                raise ValueError(
+                    f"Massimo {AppMeta.MAX_BATCH_SIZE} file per batch"
+                )
             paths = [self._validate_path(str(path)) for path in raw_paths]
             job = self._controller.run_batch(paths)
             return self._json({"ok": True, "job_id": job.job_id})
@@ -269,15 +325,22 @@ class WebBridge(QObject):
                 self._controller.cancel_active_batch()
             return self._json({"ok": True, "operation": operation})
         except Exception as exc:
-            self._error("Impossibile annullare l'operazione.", details=str(exc))
+            self._error(
+                "Impossibile annullare l'operazione.",
+                details=str(exc),
+            )
             return self._json({"ok": False, "error": str(exc)})
 
     @Slot(result=str)
     def reloadModel(self) -> str:
         try:
             if self._controller.operation != OP_IDLE:
-                raise RuntimeError("Attendi la conclusione dell'operazione in corso")
-            self._controller.request_model_load(self._controller.settings.default_device)
+                raise RuntimeError(
+                    "Attendi la conclusione dell'operazione in corso"
+                )
+            self._controller.request_model_load(
+                self._controller.settings.default_device
+            )
             return self._json({"ok": True})
         except Exception as exc:
             self._error("Impossibile ricaricare il modello.", details=str(exc))
@@ -286,7 +349,9 @@ class WebBridge(QObject):
     @Slot(result=str)
     def refreshHardware(self) -> str:
         try:
-            return self._json({"ok": True, "devices": self._device_dicts(refresh=True)})
+            devices = self._device_dicts(refresh=True)
+            self._devices_snapshot = list(devices)
+            return self._json({"ok": True, "devices": devices})
         except Exception as exc:
             return self._json({"ok": False, "error": str(exc)})
 
@@ -300,22 +365,26 @@ class WebBridge(QObject):
                 "language",
                 "output_dir",
                 "preprocessing_enabled",
-                "confidence_threshold",
             }
-            overrides = {key: value for key, value in payload.items() if key in allowed}
-            if "confidence_threshold" in overrides:
-                value = float(overrides["confidence_threshold"])
-                if not 0.0 <= value <= 1.0:
-                    raise ValueError("La soglia di confidenza deve essere tra 0 e 1")
-                overrides["confidence_threshold"] = value
+            overrides = {
+                key: value for key, value in payload.items() if key in allowed
+            }
             if "language" in overrides:
-                overrides["language"] = str(overrides["language"]).strip() or "ita+eng"
+                overrides["language"] = (
+                    str(overrides["language"]).strip() or "ita+eng"
+                )
             if "output_dir" in overrides:
-                overrides["output_dir"] = str(Path(str(overrides["output_dir"])).expanduser())
+                overrides["output_dir"] = str(
+                    Path(str(overrides["output_dir"])).expanduser()
+                )
             if "preprocessing_enabled" in overrides:
-                overrides["preprocessing_enabled"] = bool(overrides["preprocessing_enabled"])
+                overrides["preprocessing_enabled"] = bool(
+                    overrides["preprocessing_enabled"]
+                )
             self._controller.update_settings(**overrides)
-            return self._json({"ok": True, "settings": asdict(self._controller.settings)})
+            return self._json(
+                {"ok": True, "settings": asdict(self._controller.settings)}
+            )
         except Exception as exc:
             logger.warning("Salvataggio impostazioni fallito: %s", exc)
             return self._json({"ok": False, "error": str(exc)})
@@ -323,7 +392,11 @@ class WebBridge(QObject):
     @Slot(str, result=str)
     def chooseOutputDirectory(self, current: str) -> str:
         start = current or str(Path.home())
-        path = QFileDialog.getExistingDirectory(self._window, "Directory output", start)
+        path = QFileDialog.getExistingDirectory(
+            self._window,
+            "Directory output",
+            start,
+        )
         if not path:
             return self._json({"ok": True, "cancelled": True})
         return self._json({"ok": True, "cancelled": False, "path": path})
@@ -333,7 +406,10 @@ class WebBridge(QObject):
         if width < 320 or height < 320:
             return
         try:
-            self._controller.update_settings(window_width=width, window_height=height)
+            self._controller.update_settings(
+                window_width=width,
+                window_height=height,
+            )
         except Exception:
             logger.exception("Impossibile salvare le dimensioni finestra")
 
@@ -344,7 +420,8 @@ class WebBridge(QObject):
             if not AppMeta.LOG_PATH.exists():
                 return ""
             lines = AppMeta.LOG_PATH.read_text(
-                encoding="utf-8", errors="replace"
+                encoding="utf-8",
+                errors="replace",
             ).splitlines()
             return "\n".join(lines[-max_lines:])
         except OSError as exc:
@@ -385,9 +462,15 @@ class WebBridge(QObject):
             self._controller.cancel_active_batch()
         except Exception:
             logger.exception("Errore durante la cancellazione in shutdown")
-        thread: threading.Thread | None
+
+        with self._init_thread_lock:
+            init_thread = self._init_thread
+        if init_thread is not None and init_thread.is_alive():
+            init_thread.join(timeout=max(0.0, wait_ms / 1000.0))
+
         with self._model_thread_lock:
-            thread = self._model_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=max(0.0, wait_ms / 1000.0))
+            model_thread = self._model_thread
+        if model_thread is not None and model_thread.is_alive():
+            model_thread.join(timeout=max(0.0, wait_ms / 1000.0))
+
         self._controller.shutdown()

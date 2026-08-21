@@ -17,8 +17,8 @@ from config.constants import AppMeta
 from config.settings import Settings
 from config.theme import ThemeColors
 from core.app_controller import AppController
+from ui.app_web_bridge import AppWebBridge
 from ui.tray_icon import TrayIcon
-from ui.web_bridge import WebBridge
 from ui.window import MainWindow
 
 _controller_ref: list[AppController | None] = [None]
@@ -131,7 +131,7 @@ def main() -> None:
         app.setWindowIcon(icon)
         window.setWindowIcon(icon)
 
-    bridge = WebBridge(controller, window=window, parent=window)
+    bridge = AppWebBridge(controller, window=window, parent=window)
     channel = QWebChannel(window.page())
     channel.registerObject("backend", bridge)
     window.page().setWebChannel(channel)

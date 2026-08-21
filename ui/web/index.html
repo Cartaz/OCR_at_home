@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="settings.css">
     <script src="qrc:///qtwebchannel/qwebchannel.js" defer></script>
     <script src="app.js" defer></script>
+    <script src="save_ui.js" defer></script>
 </head>
 <body>
     <div class="app-shell">
@@ -134,9 +135,13 @@
                                 <span class="field-label">Testo riconosciuto</span>
                                 <div class="result-meta" id="single-result-meta">Il risultato apparirà qui.</div>
                             </div>
-                            <button class="icon-button" id="copy-single-button" type="button" title="Copia testo" aria-label="Copia testo" disabled>
-                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v12H8zM5 4h10v4M5 4v12h3"/></svg>
-                            </button>
+                            <div class="inline-controls">
+                                <button class="button" id="save-single-txt-button" type="button" title="Salva come TXT" disabled>TXT</button>
+                                <button class="button" id="save-single-md-button" type="button" title="Salva come Markdown" disabled>MD</button>
+                                <button class="icon-button" id="copy-single-button" type="button" title="Copia testo" aria-label="Copia testo" disabled>
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v12H8zM5 4h10v4M5 4v12h3"/></svg>
+                                </button>
+                            </div>
                         </div>
                         <pre class="result-view inset" id="single-result" tabindex="0">Nessun risultato.</pre>
                     </div>
@@ -282,7 +287,7 @@
                             </div>
 
                             <div class="form-field">
-                                <label class="field-label" for="output-dir-input">Directory output configurata</label>
+                                <label class="field-label" for="output-dir-input">Directory output</label>
                                 <div class="file-row">
                                     <div class="inset-field text-field grow">
                                         <input id="output-dir-input" type="text" autocomplete="off" spellcheck="false">
@@ -291,7 +296,7 @@
                                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6l2 2h8v11H4z"/></svg>
                                     </button>
                                 </div>
-                                <p class="field-help">Il core conserva questa preferenza; il viewer non salva file automaticamente.</p>
+                                <p class="field-help">I risultati salvati in TXT o Markdown vengono scritti qui. I file esistenti non vengono sovrascritti.</p>
                             </div>
 
                             <div class="action-row end">

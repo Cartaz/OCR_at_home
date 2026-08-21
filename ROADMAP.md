@@ -47,38 +47,43 @@ Goal: improve recognition quality using measured evidence rather than intuition.
 - [~] Benchmark the current `OCR` prompt against official text-recognition prompt(s).
   - [x] First hardware-backed synthetic baseline completed: both prompts reached CER 0.0000 on all four text samples.
   - [x] Preserve the first baseline and document why its timing comparison is order-biased.
-  - [x] Add warm-up, repeated rounds, counterbalanced prompt order and paired statistics.
+  - [x] Run and review the repeated synthetic benchmark: 24/24 text runs reached CER 0.0000, confirming a quality tie.
+  - [x] Document the strong repeated-input llama-server cache effect; cached wall-clock timings are not prompt-selection evidence.
+  - [x] Add a canonical cache-aware runner with true per-sample prompt-order alternation and accuracy-only decision summaries.
   - [x] Add support for labelled real-world corpora through `manifest.json`.
-  - [ ] Run and review the counterbalanced repeated synthetic benchmark.
   - [ ] Run and review at least one labelled real-world corpus before changing the production default.
 - [ ] Add explicit OCR modes only when benchmark evidence supports them:
   - Text;
   - Formula;
   - Table;
   - structured extraction/schema mode if supported by the active backend.
-  - First specialized baseline: table output matched all synthetic cells; formula output was broadly correct but mistranscribed the `+/-` operator, so neither mode is considered fully validated yet.
+  - Two specialized synthetic baselines: table output matched all cells; formula output repeatedly mistranscribed the `+/-` operator, so formula mode is not validated yet.
 - [ ] Reassess the language preference after prompt-mode work; either make it operational or remove it.
 
 Acceptance criteria:
 - Prompt changes have reproducible before/after results.
 - Default behavior never regresses silently.
-- A production prompt change requires both counterbalanced synthetic evidence and labelled real-world evidence.
+- A production prompt change requires labelled real-world evidence.
+- Repeated identical-image cache timings are never presented as intrinsic prompt performance.
 
 ## Phase 3 — Real output workflow
 
 Goal: turn OCR results into durable files without inventing behavior that does not exist.
 
-- [ ] Add `Save result` for single OCR.
-- [ ] Support `.txt` and `.md` output.
+- [x] Add `Save result` for single OCR.
+- [x] Support `.txt` and `.md` output.
 - [ ] Add optional automatic batch saving to configured output directory.
-- [ ] Use source-derived filenames and safe collision handling.
-- [ ] Use atomic writes; never silently overwrite existing files.
-- [ ] For PDFs, support a single combined output and optionally per-page output.
-- [ ] Make the output-directory setting operational and update its UI description accordingly.
+- [x] Use source-derived filenames and safe collision handling.
+- [x] Use atomic publication; never silently overwrite existing files.
+- [~] PDF output workflow.
+  - [x] Save the combined OCR result for a PDF as one `.txt` or `.md` file.
+  - [ ] Optionally save one file per PDF page.
+- [x] Make the output-directory setting operational and update its UI description accordingly.
 
 Acceptance criteria:
 - Every save action reports success/failure truthfully.
 - Existing files are never destroyed without explicit user intent.
+- A newly selected source cannot accidentally save the previous document's OCR text under its filename.
 
 ## Phase 4 — Model memory management
 

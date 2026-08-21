@@ -40,7 +40,6 @@ class Settings:
     output_dir: str = str(Path.home() / "Documents" / "glm-ocr-output")
     preprocessing_enabled: bool = True
     model_path: str = str(AppMeta.GGUF_MODEL_DIR)
-    confidence_threshold: float = OCRDefaults.DEFAULT_CONFIDENCE_THRESHOLD
     window_width: int = UIConstraints.WINDOW_WIDTH
     window_height: int = UIConstraints.WINDOW_HEIGHT
 
@@ -60,7 +59,11 @@ class Settings:
 
     @classmethod
     def load(cls) -> Settings:
-        """Carica le impostazioni e forza qualsiasi device legacy su SYCL."""
+        """Carica le impostazioni e forza qualsiasi device legacy su SYCL.
+
+        Le chiavi non più supportate (per esempio la vecchia
+        ``confidence_threshold``) vengono ignorate in modo compatibile.
+        """
         if not AppMeta.SETTINGS_PATH.exists():
             logger.info("Nessun file impostazioni trovato, uso i default")
             return cls()

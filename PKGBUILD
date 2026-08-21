@@ -1,7 +1,7 @@
 # Maintainer: Cartaz
 pkgname=glm-ocr
 pkgver=1.0.0
-pkgrel=3
+pkgrel=4
 pkgdesc="OCR locale con GLM-OCR e llama.cpp SYCL"
 arch=('x86_64')
 url="https://github.com/Cartaz/OCR_at_home"
@@ -28,7 +28,6 @@ package() {
         "$srcdir/$pkgname/assets" \
         "$srcdir/$pkgname/config" \
         "$srcdir/$pkgname/core" \
-        "$srcdir/$pkgname/qml" \
         "$srcdir/$pkgname/ui" \
         "$appdir/"
     install -Dm644 "$srcdir/$pkgname/main.py" "$appdir/main.py"

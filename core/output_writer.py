@@ -14,6 +14,7 @@ from typing import Sequence
 
 SUPPORTED_TEXT_FORMATS = {"txt", "md"}
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_PDF_PAGE_MARKER = re.compile(r"(?m)^--- Pagina (\d+) ---\n")
 
 
 def safe_source_stem(source_path: str | Path) -> str:
@@ -27,6 +28,32 @@ def safe_source_stem(source_path: str | Path) -> str:
     stem = _INVALID_FILENAME_CHARS.sub("_", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
     return stem or "ocr-result"
+
+
+def split_combined_pdf_text(combined_text: str) -> list[str]:
+    """Recover page texts from the deterministic combined PDF representation.
+
+    Multi-page OCR output is produced internally as ``--- Pagina N ---`` blocks.
+    Marker numbering is validated before splitting; malformed or ambiguous data is
+    rejected rather than silently producing incorrectly numbered page files.
+    A single-page PDF has no marker and is therefore represented by one element.
+    """
+    text = str(combined_text)
+    matches = list(_PDF_PAGE_MARKER.finditer(text))
+    if not matches:
+        return [text]
+
+    numbers = [int(match.group(1)) for match in matches]
+    expected = list(range(1, len(matches) + 1))
+    if numbers != expected:
+        raise ValueError("Output PDF combinato con marcatori pagina non validi")
+
+    pages: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        pages.append(text[start:end].strip("\n"))
+    return pages
 
 
 def _normalize_format(file_format: str) -> str:
@@ -79,8 +106,6 @@ def _write_atomic_unique(
         while True:
             destination = _candidate_path(directory, stem, suffix, index)
             try:
-                # Hard-link publication is atomic and fails when the target
-                # already exists, so no concurrent writer can be overwritten.
                 os.link(temp_path, destination)
                 break
             except FileExistsError:
@@ -129,12 +154,7 @@ def write_ocr_pages(
     page_texts: Sequence[str],
     file_format: str,
 ) -> list[Path]:
-    """Publish one collision-safe output file per PDF page.
-
-    Empty OCR pages are represented by an empty file so page numbering remains
-    faithful to the source PDF. Each page is independently atomically published
-    and existing files are never replaced.
-    """
+    """Publish one collision-safe output file per PDF page."""
     if isinstance(page_texts, (str, bytes)) or not page_texts:
         raise ValueError("Nessuna pagina PDF da salvare")
 

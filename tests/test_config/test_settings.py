@@ -36,3 +36,23 @@ def test_legacy_generic_device_is_migrated_to_sycl(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(AppMeta, "SETTINGS_PATH", settings_path)
     loaded = Settings.load()
     assert loaded.default_device == "llama-cpp-sycl"
+
+
+def test_legacy_confidence_threshold_is_ignored(monkeypatch, tmp_path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "default_device": "llama-cpp-sycl",
+                "language": "ita",
+                "confidence_threshold": 0.95,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(AppMeta, "SETTINGS_PATH", settings_path)
+
+    loaded = Settings.load()
+
+    assert loaded.language == "ita"
+    assert not hasattr(loaded, "confidence_threshold")

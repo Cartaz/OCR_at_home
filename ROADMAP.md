@@ -12,19 +12,19 @@ This roadmap is the persistent implementation plan for the project. Items are ch
 
 Goal: make every value and control shown by the application truthful, then remove temporary compatibility layers introduced during the UI rebuild.
 
-- [~] Remove fabricated OCR confidence values.
+- [x] Remove fabricated OCR confidence values.
   - `OCRResult.confidence` becomes optional/unknown when the backend does not provide a real score.
   - Do not show a percentage when no real confidence exists.
   - Remove the unused confidence-threshold setting from the active configuration/UI path.
   - Existing `settings.json` files containing the legacy key must continue to load safely.
-- [ ] Consolidate the non-blocking WebEngine startup into `WebBridge`.
+- [x] Consolidate the non-blocking WebEngine startup into `WebBridge`.
   - Preserve immediate first-frame rendering.
   - Remove `ResponsiveWebBridge` once equivalent behavior is covered by tests.
 - [ ] Make the language selector native HTML rather than post-load DOM injection.
   - Preserve Italiano / English / Italiano + English choices.
   - Keep the UI explicit that language is not currently forced in the GLM-OCR prompt.
   - Remove `settings_ui.js` after equivalent markup/style is integrated.
-- [ ] Keep shutdown/process-lifecycle regressions covered.
+- [x] Keep shutdown/process-lifecycle regressions covered.
 
 Acceptance criteria:
 - No fabricated confidence is exposed anywhere.

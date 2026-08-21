@@ -120,15 +120,37 @@ Acceptance criteria:
 
 Goal: tune preprocessing and rendering only from measured accuracy/performance data.
 
-- [ ] Benchmark PDF render DPI (including current 150 DPI behavior).
-- [ ] Benchmark preprocessing enabled/disabled by document class.
-- [ ] Benchmark maximum image dimension.
-- [ ] Benchmark JPEG quality / transfer cost.
-- [ ] Measure OCR quality and end-to-end latency together.
+- [x] Make pipeline parameters overrideable for benchmarks without changing production defaults.
+  - Production remains preprocessing ON, PDF 150 DPI, max dimension 1920 px and JPEG quality 85.
+- [x] Add a one-factor-at-a-time benchmark suite covering:
+  - preprocessing enabled/disabled;
+  - PDF DPI 100 / 150 / 200 / 300;
+  - maximum image dimension 1280 / 1600 / 1920 / 2560;
+  - JPEG quality 70 / 85 / 95.
+- [x] Add deterministic raster samples plus a labelled two-page vector PDF for DPI testing.
+- [x] Reuse the labelled `manifest.json` corpus format for representative real images/PDFs.
+- [x] Measure OCR quality and pipeline cost together.
+  - CER and worst CER;
+  - end-to-end elapsed time;
+  - PDF render/preprocess time;
+  - llama-server request/timing metadata;
+  - JPEG transfer bytes and sent dimensions;
+  - llama-server `cache_n`.
+- [x] Add `--restart-server-per-config` so latency comparisons can reset repeated-request cache state.
+- [~] Run and review the hardware-backed pipeline benchmark.
+  - [ ] Quick synthetic screening pass.
+  - [ ] Fresh-server-per-config timing/quality pass.
+  - [ ] Review PDF DPI candidates.
+  - [ ] Review preprocessing by document class.
+  - [ ] Review max-dimension trade-off.
+  - [ ] Review JPEG quality/transfer trade-off.
+  - [ ] Validate any winning candidate on representative real documents before changing production defaults.
 - [ ] Change defaults only if results justify the change.
 
 Acceptance criteria:
 - Every tuning change has a recorded benchmark rationale.
+- No production default changes before hardware results are reviewed.
+- Latency decisions use controlled cache state rather than repeated-image cache artifacts.
 
 ## Phase 6 — End-to-end lifecycle and failure testing
 

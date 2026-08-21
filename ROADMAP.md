@@ -51,7 +51,11 @@ Goal: improve recognition quality using measured evidence rather than intuition.
   - [x] Document the strong repeated-input llama-server cache effect; cached wall-clock timings are not prompt-selection evidence.
   - [x] Add a canonical cache-aware runner with true per-sample prompt-order alternation and accuracy-only decision summaries.
   - [x] Add support for labelled real-world corpora through `manifest.json`.
-  - [x] Build the canonical three-level real-world suite (digital PDF / dense scanned PDF / handwriting) with exact Markdown ground truth, five-run trimmed means and an automatic `OCR` vs `Text Recognition:` shootout.
+  - [x] Build the canonical three-level real-world suite with an automatic `OCR` vs `Text Recognition:` shootout.
+    - FACILE: digital PDF.
+    - MEDIO: dense scanned PDF.
+    - DIFFICILE: one continuous handwritten page, scored overall and separately as MAIUSCOLO / SCRIPT / CORSIVO without splitting the OCR request.
+    - Five-run trimmed means, strict Markdown ground truth and cache-free timing.
   - [ ] Run and review the canonical labelled real-world suite before changing the production default.
 - [ ] Add explicit OCR modes only when benchmark evidence supports them:
   - Text;
@@ -117,36 +121,51 @@ Acceptance criteria:
 - No orphan app-owned `llama-server` remains after unload, reload, cancellation or exit.
 - The UI remains usable while the model is unloaded and a new OCR transparently reloads it.
 
-## Phase 5 — Image/PDF pipeline benchmarking
+## Phase 5 — Pipeline and llama-server benchmarking
 
-Goal: tune preprocessing and rendering only from measured accuracy/performance data.
+Goal: tune OCR input preparation and the relevant llama.cpp runtime from measured accuracy/performance data, without changing production defaults until hardware evidence exists.
 
 - [x] Build benchmark-only pipeline overrides without changing production defaults.
   - PDF DPI, max image dimension and JPEG quality are independently selectable.
   - Preprocessing is separable into `none`, `contrast`, `resize` and `full`; `full` remains equivalent to production behavior.
-  - Benchmark requests can explicitly disable llama.cpp prompt caching while production requests preserve their existing payload shape.
-- [x] Build the canonical real-world benchmark protocol.
-  - Three labelled difficulty levels: digital PDF, dense scanned PDF and handwriting.
+  - Benchmark requests explicitly disable llama.cpp prompt caching while production requests preserve their existing payload shape.
+- [x] Build benchmark-only llama-server runtime profiles without changing the production backend.
+  - Detect supported flags from the installed pinned `llama-server --help`.
+  - Sweep context size, batch, ubatch, generation threads, prompt/batch threads, Flash Attention, KV K/V cache types, MTP speculative decoding when supported, KV offload and operation offload.
+  - Keep SYCL-only, full GPU-layer offload and `--parallel 1` fixed as architectural constraints.
+  - Record server RSS as an additional diagnostic.
+- [x] Build the canonical real-world benchmark protocol v2.
+  - Three labelled difficulty levels: digital PDF, dense scanned PDF and one continuous handwritten page.
+  - The handwritten OCR remains one request; global alignment produces MAIUSCOLO / SCRIPT / CORSIVO submetrics.
   - Five runs per configuration; remove one best/fastest and one worst/slowest metric value and average the middle three.
-  - Rotate document order, use a non-corpus warm-up and fresh app-owned server per configuration by default.
-  - Stage A sweeps one variable at a time.
-  - Stage B advances the five fastest values per variable that remain inside the accuracy quality gate; preprocessing has at most four values.
-  - Stage B evaluates the finalist Cartesian product, with deterministic ordering and production baseline controls at start/end.
-  - CER, WER, character accuracy, end-to-end/request/render/preprocess timing, JPEG bytes, sent dimensions and cache counters are retained.
+  - Rotate document order, use a non-corpus warm-up and a fresh app-owned server per profile.
+  - Apply relative hard quality gates to macro accuracy, every document, every handwriting subsegment and WER.
+  - BORDERLINE configurations automatically receive five more runs; ten-run results use a two-sided 20% trim.
+  - Stage A sweeps every supported pipeline/runtime variable one factor at a time and advances the five fastest PASS values.
+  - Stage B uses a deterministic quality-gated beam search (width 5) rather than an impractical full Cartesian product.
+  - Invalid runtime combinations such as `ubatch > batch` are skipped.
+  - The current value remains a Stage B candidate so adding a variable is never mandatory.
+  - Finalists are re-run with production baseline controls before recommendation, preventing cumulative small quality losses from being accepted silently.
+  - CER, WER, character accuracy, end-to-end/request/render/preprocess timing, JPEG bytes, sent dimensions, cache counters, runtime values and handwriting submetrics are retained.
   - Emit accuracy/speed/recommended rankings, Pareto frontier, raw outputs, SHA-256 input identity and resumable checkpoints.
   - `benchmark-results/` is ignored because real OCR output can contain private text.
-- [ ] Execute and review the real-world PDF DPI sweep (including current 150 DPI behavior).
-- [ ] Execute and review preprocessing modes by document class.
-- [ ] Execute and review maximum image dimension sweep.
-- [ ] Execute and review JPEG quality / transfer-cost sweep.
-- [ ] Execute and review the Stage B finalist matrix with five-run trimmed means.
-- [ ] Measure OCR quality and end-to-end latency together on target SYCL hardware.
-- [ ] Change defaults only if results justify the change.
+- [ ] Execute and review the canonical hardware benchmark on the three labelled documents.
+  - [ ] Prompt shootout.
+  - [ ] Pipeline/input Stage A sweeps.
+  - [ ] llama-server runtime Stage A sweeps.
+  - [ ] Quality-gated Stage B beam search.
+  - [ ] Final confirmation against production baseline controls.
+- [ ] Review absolute capability separately for FACILE, MEDIO, DIFFICILE, MAIUSCOLO, SCRIPT and CORSIVO.
+  - No arbitrary absolute handwriting threshold is imposed before seeing real results.
+  - If all handwriting candidates are poor, relative selection still identifies the least-bad profile while the report preserves the absolute limitation.
+- [ ] Change production prompt/pipeline/runtime defaults only if the final hardware results justify the change.
 
 Acceptance criteria:
 - Every tuning change has a recorded benchmark rationale.
-- The recommended configuration is the fastest Stage B configuration inside the defined accuracy tolerance of the best measured result, not an arbitrary weighted speed/quality score.
+- No candidate can hide a large handwriting regression behind a good macro average.
+- The recommended configuration is the fastest complete profile that survives the final accuracy/word-error gates against the measured reference set.
 - Cached requests are not accepted as speed evidence.
+- Unsupported or non-starting runtime profiles fail as benchmark candidates rather than changing/falling back the production runtime.
 
 ## Phase 6 — End-to-end lifecycle and failure testing
 
@@ -211,7 +230,7 @@ Acceptance criteria:
 3. Phase 3 output workflow.
 4. Phase 4 model memory management.
 5. Phase 6 lifecycle tests.
-6. Phase 5 pipeline tuning.
+6. Phase 5 pipeline/runtime tuning.
 7. Phase 7 UX.
 8. Phase 8 repository/release maintenance continuously as needed.
 

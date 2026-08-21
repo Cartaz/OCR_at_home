@@ -12,6 +12,22 @@ INCOLLA QUI LA TRASCRIZIONE ESATTA DEL PDF SCANSIONATO DENSO.
 
 # DIFFICILE
 
+Il documento DIFFICILE deve essere un unico testo continuo scritto sulla stessa pagina. Cambia solo lo stile grafico tra le tre sezioni; non creare tre documenti separati.
+
+## MAIUSCOLO
+
 ```text
-INCOLLA QUI LA TRASCRIZIONE ESATTA DELLA PAGINA SCRITTA A MANO.
+INCOLLA QUI LA PRIMA PARTE DEL TESTO, SCRITTA IN MAIUSCOLO.
+```
+
+## SCRIPT
+
+```text
+INCOLLA QUI LA CONTINUAZIONE DELLO STESSO TESTO, SCRITTA IN SCRIPT.
+```
+
+## CORSIVO
+
+```text
+INCOLLA QUI LA PARTE FINALE DELLO STESSO TESTO, SCRITTA IN CORSIVO.
 ```

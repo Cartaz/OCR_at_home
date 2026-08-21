@@ -1,5 +1,4 @@
-# main.py
-"""GLM OCR — entry point Qt Quick/QML."""
+"""GLM OCR desktop entry point using a local HTML/CSS/JavaScript frontend."""
 
 from __future__ import annotations
 
@@ -9,18 +8,18 @@ import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuickControls2 import QQuickStyle
+from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWidgets import QApplication
 
 from config.constants import AppMeta
 from config.settings import Settings
 from config.theme import ThemeColors
 from core.app_controller import AppController
-from ui.qml_bridge import QmlBridge
 from ui.tray_icon import TrayIcon
+from ui.web_bridge import WebBridge
+from ui.window import MainWindow
 
 _controller_ref: list[AppController | None] = [None]
 
@@ -39,7 +38,6 @@ def setup_logging() -> None:
 
 
 def _shutdown_controller_ref() -> None:
-    """Arresta solo le risorse possedute dall'istanza corrente dell'app."""
     controller = _controller_ref[0]
     if controller is None:
         return
@@ -52,38 +50,43 @@ def _shutdown_controller_ref() -> None:
 def _signal_handler(signum: int, _frame: object) -> None:
     logger = logging.getLogger("GLM OCR")
     logger.info("Segnale %s ricevuto, arresto in corso...", signum)
-    _shutdown_controller_ref()
-    raise SystemExit(0)
+    app = QApplication.instance()
+    if app is not None:
+        app.quit()
+    else:
+        _shutdown_controller_ref()
+        raise SystemExit(0)
 
 
-def _widget_aux_stylesheet() -> str:
-    """Tema dei widget residui: tray menu, dialoghi e tooltip."""
+def _native_aux_stylesheet() -> str:
+    """Keep native tray menus/tooltips aligned with the single dark surface."""
     return f"""
     QMenu {{
-        background-color: #1A1A1A;
+        background: {ThemeColors.BG_MAIN};
         color: {ThemeColors.TEXT_PRIMARY};
-        border: 1px solid #292929;
-        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 10px;
         padding: 6px;
     }}
     QMenu::item {{
-        padding: 7px 24px;
-        border-radius: 5px;
+        background: {ThemeColors.BG_MAIN};
+        padding: 8px 24px;
+        border-radius: 7px;
     }}
     QMenu::item:selected {{
-        background-color: {ThemeColors.PRIMARY};
-        color: {ThemeColors.TEXT_ON_ACCENT};
+        background: {ThemeColors.BG_MAIN};
+        color: {ThemeColors.PRIMARY};
     }}
     QMenu::separator {{
         height: 1px;
-        background-color: #292929;
+        background: rgba(255, 255, 255, 0.05);
         margin: 5px 8px;
     }}
     QToolTip {{
-        background-color: #1D1D1D;
+        background: {ThemeColors.BG_MAIN};
         color: {ThemeColors.TEXT_PRIMARY};
-        border: 1px solid #2A2A2A;
-        padding: 4px 8px;
+        border: 1px solid rgba(255, 102, 0, 0.55);
+        padding: 5px 8px;
     }}
     """
 
@@ -91,23 +94,15 @@ def _widget_aux_stylesheet() -> str:
 def main() -> None:
     setup_logging()
     logger = logging.getLogger("GLM OCR")
-    logger.info("Avvio GLM OCR (Qt Quick/QML)...")
+    logger.info("Avvio GLM OCR (Qt WebEngine)...")
 
     settings = Settings.load()
-    logger.info(
-        "Impostazioni caricate — device=%s, lang=%s",
-        settings.default_device,
-        settings.language,
-    )
-
-    QQuickStyle.setStyle("Basic")
-
     app = QApplication(sys.argv)
     app.setApplicationName(AppMeta.NAME)
     app.setApplicationDisplayName(AppMeta.NAME)
     app.setOrganizationName(AppMeta.ID)
-    app.setQuitOnLastWindowClosed(True)
-    app.setStyleSheet(_widget_aux_stylesheet())
+    app.setQuitOnLastWindowClosed(False)
+    app.setStyleSheet(_native_aux_stylesheet())
 
     controller = AppController(settings=settings)
     _controller_ref[0] = controller
@@ -115,49 +110,55 @@ def main() -> None:
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    # Permette all'interprete Python di processare SIGINT anche mentre Qt è
-    # nell'event loop senza introdurre thread o handler nativi aggiuntivi.
     sigint_timer = QTimer()
     sigint_timer.timeout.connect(lambda: None)
     sigint_timer.start(50)
 
-    bridge = QmlBridge(controller)
-    app.aboutToQuit.connect(bridge.shutdown)
-
-    engine = QQmlApplicationEngine()
-    engine.rootContext().setContextProperty("backend", bridge)
-
-    qml_path = Path(__file__).parent / "qml" / "Main.qml"
-    engine.load(QUrl.fromLocalFile(str(qml_path)))
-    if not engine.rootObjects():
-        logger.error("Impossibile caricare la UI QML: %s", qml_path)
-        bridge.shutdown()
+    web_root = Path(__file__).parent / "ui" / "web"
+    index_path = web_root / "index.html"
+    if not index_path.is_file():
+        logger.error("Frontend HTML mancante: %s", index_path)
         raise SystemExit(1)
 
-    window = engine.rootObjects()[0]
-    bridge.set_window(window)
+    window = MainWindow(web_root)
+    window.setWindowTitle(AppMeta.NAME)
+    window.resize(settings.window_width, settings.window_height)
+    window.setMinimumSize(420, 480)
 
     icon_path = Path(__file__).parent / "assets" / "icons" / "glm-ocr.svg"
-    if icon_path.exists():
+    if icon_path.is_file():
         icon = QIcon(str(icon_path))
         app.setWindowIcon(icon)
-        try:
-            window.setIcon(icon)
-        except (AttributeError, RuntimeError):
-            pass
+        window.setWindowIcon(icon)
+
+    bridge = WebBridge(controller, window=window, parent=window)
+    channel = QWebChannel(window.page())
+    channel.registerObject("backend", bridge)
+    window.page().setWebChannel(channel)
 
     tray = TrayIcon(
+        icon_path=str(icon_path) if icon_path.is_file() else None,
         parent=app,
-        icon_path=str(icon_path) if icon_path.exists() else None,
     )
-    tray.show()
-    tray.show_window_requested.connect(bridge.showWindow)
-    tray.connect_start_action(bridge.startOcr)
-    tray.connect_stop_action(bridge.stopOcr)
-    tray.quit_requested.connect(bridge.forceQuit)
+    if tray.available:
+        tray.show()
+        window.hide_on_close = True
+        tray.show_window_requested.connect(bridge.showWindow)
+        tray.cancel_requested.connect(bridge.cancelOperation)
+        tray.quit_requested.connect(bridge.forceQuit)
+    else:
+        app.setQuitOnLastWindowClosed(True)
+        window.hide_on_close = False
 
-    controller.initialize()
-    logger.info("GLM OCR pronto")
+    app.aboutToQuit.connect(bridge.shutdown)
+
+    def on_load_finished(ok: bool) -> None:
+        if not ok:
+            logger.error("Impossibile caricare il frontend HTML: %s", index_path)
+
+    window.loadFinished.connect(on_load_finished)
+    window.show()
+    logger.info("GLM OCR UI pronta")
     raise SystemExit(app.exec())
 
 

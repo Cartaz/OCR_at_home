@@ -25,6 +25,8 @@ class EventBridge(QObject):
         "hardware_detected",
         "operation_changed",
         "model_loading",
+        "model_unloading",
+        "model_unloaded",
         "model_load_progress",
         "config_changed",
         "ocr_started",

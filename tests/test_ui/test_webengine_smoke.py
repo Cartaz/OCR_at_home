@@ -40,6 +40,21 @@ def _close_window(window: MainWindow) -> None:
     window.deleteLater()
 
 
+def _run_json_script(window: MainWindow, script: str) -> object:
+    result: list[str] = []
+    loop = QEventLoop()
+
+    def finished(value: object) -> None:
+        result.append(str(value))
+        loop.quit()
+
+    window.page().runJavaScript(script, finished)
+    QTimer.singleShot(3000, loop.quit)
+    loop.exec()
+    assert len(result) == 1
+    return json.loads(result[0])
+
+
 def test_main_web_frontend_loads_offscreen() -> None:
     app, window = _load_window()
     _close_window(window)
@@ -48,8 +63,6 @@ def test_main_web_frontend_loads_offscreen() -> None:
 
 def test_output_settings_module_executes_in_real_webengine() -> None:
     app, window = _load_window()
-    result: list[str] = []
-    loop = QEventLoop()
     script = """
         (() => {
             applySettings({
@@ -70,16 +83,52 @@ def test_output_settings_module_executes_in_real_webengine() -> None:
         })();
     """
 
-    def finished(value: object) -> None:
-        result.append(str(value))
-        loop.quit()
+    assert _run_json_script(window, script) == [True, "md", True, False, True]
+    _close_window(window)
+    _ = app
 
-    window.page().runJavaScript(script, finished)
-    QTimer.singleShot(3000, loop.quit)
-    loop.exec()
 
-    assert len(result) == 1
-    assert json.loads(result[0]) == [True, "md", True, False, True]
+def test_model_memory_module_executes_in_real_webengine() -> None:
+    app, window = _load_window()
+    script = """
+        (() => {
+            state.devices = [{available: true, device_name: 'SYCL'}];
+            state.modelReady = false;
+            state.operation = 'idle';
+            state.singlePath = '/tmp/scan.png';
+            state.batchPaths = ['/tmp/scan.png'];
+            applySettings({
+                preprocessing_enabled: true,
+                language: 'ita+eng',
+                output_dir: '/tmp/glm-ocr-test',
+                load_model_at_startup: false,
+                model_auto_unload_minutes: 30
+            });
+            updateBackendPanel();
+            updateOperationUi();
+            return JSON.stringify([
+                document.querySelector('#load-model-startup-toggle').checked,
+                document.querySelector('#model-auto-unload-select').value,
+                document.querySelector('#model-unload-button').disabled,
+                document.querySelector('#model-reload-button').textContent,
+                document.querySelector('#single-start-button').disabled,
+                document.querySelector('#batch-start-button').disabled,
+                document.querySelector('#backend-chip').textContent,
+                document.querySelector('#sidebar-status-text').textContent
+            ]);
+        })();
+    """
+
+    assert _run_json_script(window, script) == [
+        False,
+        "30",
+        True,
+        "Carica modello",
+        False,
+        False,
+        "Scaricato",
+        "Modello scaricato",
+    ]
     _close_window(window)
     _ = app
 

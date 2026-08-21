@@ -10,6 +10,7 @@
     <script src="qrc:///qtwebchannel/qwebchannel.js" defer></script>
     <script src="app.js" defer></script>
     <script src="save_ui.js" defer></script>
+    <script src="model_ui.js" defer></script>
 </head>
 <body>
     <div class="app-shell">
@@ -259,6 +260,7 @@
                             <div class="action-row">
                                 <button class="button" id="hardware-refresh-button" type="button">Rileva hardware</button>
                                 <button class="button" id="model-reload-button" type="button">Ricarica modello</button>
+                                <button class="button" id="model-unload-button" type="button" disabled>Scarica modello</button>
                             </div>
                         </section>
 
@@ -273,6 +275,34 @@
                                     <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
                                     <span class="sr-only">Abilita pre-elaborazione</span>
                                 </label>
+                            </div>
+
+                            <div class="setting-row">
+                                <div>
+                                    <label class="field-label" for="load-model-startup-toggle">Carica modello all'avvio</label>
+                                    <p>Se disattivato, l'interfaccia parte senza occupare RAM/VRAM e carica il modello al primo OCR.</p>
+                                </div>
+                                <label class="toggle" for="load-model-startup-toggle">
+                                    <input id="load-model-startup-toggle" type="checkbox">
+                                    <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+                                    <span class="sr-only">Carica modello all'avvio</span>
+                                </label>
+                            </div>
+
+                            <div class="form-field">
+                                <label class="field-label" for="model-auto-unload-select">Scarica modello dopo inattività</label>
+                                <div class="inset-field text-field language-select-field">
+                                    <select id="model-auto-unload-select" aria-label="Auto-unload modello">
+                                        <option value="0">Mai</option>
+                                        <option value="5">5 minuti</option>
+                                        <option value="15">15 minuti</option>
+                                        <option value="30">30 minuti</option>
+                                        <option value="60">60 minuti</option>
+                                        <option value="120">2 ore</option>
+                                    </select>
+                                    <span class="select-chevron" aria-hidden="true">⌄</span>
+                                </div>
+                                <p class="field-help">Il timer parte quando il backend torna inattivo; un nuovo OCR ricarica automaticamente il modello.</p>
                             </div>
 
                             <div class="form-field">

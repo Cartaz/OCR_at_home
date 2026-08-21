@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 
 from config.settings import Settings
-from core.app_controller import OP_IDLE, OP_MODEL_LOADING, OP_OCR, AppController
+from core.app_controller import (
+    OP_IDLE,
+    OP_MODEL_LOADING,
+    OP_MODEL_UNLOADING,
+    OP_OCR,
+    AppController,
+)
 from core.exceptions import OperationBusyError, OperationCancelledError
 from core.models import HardwareInfo, OCRResult
 from core.process_manager import ProcessManager
@@ -160,4 +166,38 @@ def test_initialize_preserves_configured_device_if_nothing_is_available(monkeypa
     assert controller.settings.default_device == "llama-cpp-sycl"
     assert controller.operation == OP_MODEL_LOADING
     assert saved == []
+    controller.shutdown()
+
+
+def test_initialize_can_leave_model_unloaded(monkeypatch) -> None:
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+    controller = AppController(
+        Settings(default_device="llama-cpp-sycl", load_model_at_startup=False)
+    )
+    controller._hardware_detector = FakeDetector()  # type: ignore[attr-defined]
+
+    controller.initialize()
+
+    assert controller.operation == OP_IDLE
+    assert controller.engine.is_initialized is False
+    controller.shutdown()
+
+
+def test_model_can_be_unloaded_and_loaded_again_without_closing_controller(monkeypatch) -> None:
+    controller, engine = _controller_with_fake_engine(monkeypatch)
+
+    controller.request_model_unload()
+    assert controller.operation == OP_MODEL_UNLOADING
+    assert engine.shutdown_calls == 0
+
+    controller.unload_model_sync()
+    assert controller.operation == OP_IDLE
+    assert engine.is_initialized is False
+    assert engine.shutdown_calls == 1
+
+    controller.request_model_load("llama-cpp-sycl")
+    controller.load_model_sync("llama-cpp-sycl")
+    assert controller.operation == OP_IDLE
+    assert engine.is_initialized is True
+    assert engine.initialize_calls == ["llama-cpp-sycl"]
     controller.shutdown()

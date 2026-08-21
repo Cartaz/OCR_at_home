@@ -121,7 +121,7 @@ def sha256_file(path: Path) -> str:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for CER/WER while removing only app-added PDF markers."""
+    """Normalize scoring text while removing only app-added PDF page markers."""
     value = unicodedata.normalize("NFKC", str(text)).replace("\r\n", "\n").replace("\r", "\n")
     value = re.sub(r"(?m)^\s*---\s*Pagina\s+\d+\s*---\s*$", "", value)
     return " ".join(value.split())
@@ -174,12 +174,7 @@ def trimmed_mean(values: Sequence[float], *, trim: int = DEFAULT_TRIM) -> float:
 
 def parse_ground_truth_markdown(text: str) -> dict[str, str]:
     """Parse strict FACILE/MEDIO/DIFFICILE fenced-text sections."""
-    headers = list(
-        re.finditer(
-            r"(?im)^\s*#\s+(FACILE|MEDIO|DIFFICILE)\s*$",
-            str(text),
-        )
-    )
+    headers = list(re.finditer(r"(?im)^\s*#\s+(FACILE|MEDIO|DIFFICILE)\s*$", str(text)))
     if len(headers) != 3:
         raise ValueError(
             "Il ground truth deve contenere esattamente le sezioni # FACILE, "
@@ -253,30 +248,29 @@ def prompt_configs() -> list[PipelineConfig]:
 
 
 def stage_a_configs(prompt: str) -> dict[str, list[PipelineConfig]]:
-    baseline = production_baseline(prompt, name="stage_a_baseline")
+    """Build OFAT sweeps; the DPI baseline has its own matched PDF-only workload."""
+    shared_baseline = production_baseline(prompt, name="stage_a_baseline")
     return {
         "pdf_dpi": [
-            baseline if value == PDF_DPI else PipelineConfig(
-                name=f"a_pdf_dpi_{value}", prompt=prompt, pdf_dpi=value
-            )
+            PipelineConfig(name=f"a_pdf_dpi_{value}", prompt=prompt, pdf_dpi=value)
             for value in PDF_DPI_VALUES
         ],
         "max_image_dim": [
-            baseline if value == MAX_IMAGE_DIM else PipelineConfig(
-                name=f"a_maxdim_{value}", prompt=prompt, max_image_dim=value
-            )
+            shared_baseline
+            if value == MAX_IMAGE_DIM
+            else PipelineConfig(name=f"a_maxdim_{value}", prompt=prompt, max_image_dim=value)
             for value in MAX_IMAGE_DIM_VALUES
         ],
         "jpeg_quality": [
-            baseline if value == JPEG_QUALITY else PipelineConfig(
-                name=f"a_jpeg_{value}", prompt=prompt, jpeg_quality=value
-            )
+            shared_baseline
+            if value == JPEG_QUALITY
+            else PipelineConfig(name=f"a_jpeg_{value}", prompt=prompt, jpeg_quality=value)
             for value in JPEG_QUALITY_VALUES
         ],
         "preprocessing_mode": [
-            baseline if value == "full" else PipelineConfig(
-                name=f"a_pre_{value}", prompt=prompt, preprocessing_mode=value
-            )
+            shared_baseline
+            if value == "full"
+            else PipelineConfig(name=f"a_pre_{value}", prompt=prompt, preprocessing_mode=value)
             for value in PREPROCESSING_VALUES
         ],
     }
@@ -321,9 +315,7 @@ def aggregate_config(
             elapsed = [item.elapsed_s for item in runs]
             request_elapsed = [_metric_total(item.metrics.get("pages", []), "request_elapsed_s") for item in runs]
             encoded_bytes = [_metric_total(item.metrics.get("pages", []), "encoded_bytes") for item in runs]
-            cache_total = sum(
-                int(_metric_total(item.metrics.get("pages", []), "cache_n")) for item in runs
-            )
+            cache_total = sum(int(_metric_total(item.metrics.get("pages", []), "cache_n")) for item in runs)
             doc = DocumentAggregate(
                 level=level,
                 successful_runs=len(runs),
@@ -349,9 +341,7 @@ def aggregate_config(
                 trimmed_elapsed_s=math.inf,
                 trimmed_request_elapsed_s=math.inf,
                 trimmed_encoded_bytes=math.inf,
-                cache_n_total=sum(
-                    int(_metric_total(item.metrics.get("pages", []), "cache_n")) for item in runs
-                ),
+                cache_n_total=sum(int(_metric_total(item.metrics.get("pages", []), "cache_n")) for item in runs),
             )
         documents[level] = doc
 
@@ -406,7 +396,11 @@ def select_fastest_quality_gated_values(
     top_n: int = DEFAULT_TOP_VALUES,
     tolerance_pp: float = DEFAULT_ACCURACY_TOLERANCE_PP,
 ) -> list[Any]:
-    valid = [(value, aggregate) for value, aggregate in candidates if aggregate.valid and aggregate.cache_n_total == 0]
+    valid = [
+        (value, aggregate)
+        for value, aggregate in candidates
+        if aggregate.valid and aggregate.cache_n_total == 0
+    ]
     if not valid:
         raise ValueError("Nessun valore Stage A valido e cache-free")
     best_accuracy = max(aggregate.macro_char_accuracy for _, aggregate in valid)
@@ -428,6 +422,7 @@ def stage_b_configs(
     required = {"pdf_dpi", "max_image_dim", "jpeg_quality", "preprocessing_mode"}
     if set(selected) != required:
         raise ValueError(f"Selezione Stage B incompleta: attese {sorted(required)}")
+
     configs: list[PipelineConfig] = []
     seen: set[str] = set()
     for dpi, max_dim, jpeg, pre in itertools.product(
@@ -436,7 +431,7 @@ def stage_b_configs(
         selected["jpeg_quality"],
         selected["preprocessing_mode"],
     ):
-        config = PipelineConfig(
+        candidate = PipelineConfig(
             name="",
             prompt=prompt,
             preprocessing_mode=str(pre),
@@ -444,27 +439,24 @@ def stage_b_configs(
             max_image_dim=int(max_dim),
             jpeg_quality=int(jpeg),
         )
-        signature = config.signature()
+        signature = candidate.signature()
         if signature in seen:
             continue
         seen.add(signature)
         configs.append(
             PipelineConfig(
                 name=f"b_{signature}",
-                prompt=config.prompt,
-                preprocessing_mode=config.preprocessing_mode,
-                pdf_dpi=config.pdf_dpi,
-                max_image_dim=config.max_image_dim,
-                jpeg_quality=config.jpeg_quality,
+                prompt=candidate.prompt,
+                preprocessing_mode=candidate.preprocessing_mode,
+                pdf_dpi=candidate.pdf_dpi,
+                max_image_dim=candidate.max_image_dim,
+                jpeg_quality=candidate.jpeg_quality,
             )
         )
     return configs
 
 
-def speedup_vs_baseline(
-    aggregate: ConfigAggregate,
-    baseline_documents: dict[str, float],
-) -> float:
+def speedup_vs_baseline(aggregate: ConfigAggregate, baseline_documents: dict[str, float]) -> float:
     ratios: list[float] = []
     for level, doc in aggregate.documents.items():
         baseline = baseline_documents.get(level)

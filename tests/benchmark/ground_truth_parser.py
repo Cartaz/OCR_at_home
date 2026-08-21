@@ -28,9 +28,9 @@ def _section_body(markdown: str, title: str, next_titles: Sequence[str]) -> str:
 
 
 def _transcription_text(body: str, label: str) -> str:
-    """Return fenced text when present, otherwise the plain section body."""
-    fence = re.search(
-        r"```(?:text)?\s*\n(.*?)\n```",
+    """Unwrap an optional whole-section fence; otherwise preserve plain Markdown."""
+    fence = re.fullmatch(
+        r"\s*```(?:text)?\s*\n(.*?)\n```\s*",
         body,
         flags=re.DOTALL | re.IGNORECASE,
     )

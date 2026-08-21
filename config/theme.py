@@ -1,56 +1,55 @@
-# config/theme.py
-"""Token cromatici condivisi dal layer Qt/Python.
-
-Il frontend principale usa gli stessi valori in qml/Theme.qml.
-"""
+"""Color tokens shared by native Qt surfaces and the HTML frontend."""
 
 from __future__ import annotations
 
 
 class ThemeColors:
-    PRIMARY: str = "#FF6600"
-    PRIMARY_DARK: str = "#C94F00"
+    """Dark neumorphic palette: one material surface and one accent color."""
 
-    DANGER: str = "#E15A36"
-    DANGER_DARK: str = "#8B3321"
+    PRIMARY: str = "#FF6600"
+    PRIMARY_DARK: str = "#FF6600"
+
+    # Error/success semantics use copy and iconography rather than extra hues.
+    DANGER: str = "#FF6600"
+    DANGER_DARK: str = "#FF6600"
 
     BG_MAIN: str = "#141414"
-    BG_CARD: str = "#181818"
-    BG_SURFACE: str = "#191919"
-    BG_SURFACE_ALT: str = "#1D1D1D"
-    BG_HOVER: str = "#202020"
-    BG_INSET: str = "#101010"
+    BG_CARD: str = "#141414"
+    BG_SURFACE: str = "#141414"
+    BG_SURFACE_ALT: str = "#141414"
+    BG_HOVER: str = "#141414"
+    BG_INSET: str = "#141414"
 
-    BORDER: str = "#252525"
+    BORDER: str = "rgba(255, 255, 255, 0.05)"
     BORDER_FOCUS: str = "#FF6600"
 
-    TEXT_PRIMARY: str = "#ECEFF1"
-    TEXT_SECONDARY: str = "#A7ADB4"
-    TEXT_DISABLED: str = "#6F757C"
-    TEXT_ON_ACCENT: str = "#111111"
-    TEXT_ON_SELECTION: str = "#111111"
+    TEXT_PRIMARY: str = "#E1E1E1"
+    TEXT_SECONDARY: str = "#878787"
+    TEXT_DISABLED: str = "#5A5A5A"
+    TEXT_ON_ACCENT: str = "#141414"
+    TEXT_ON_SELECTION: str = "#E1E1E1"
 
-    BG_TOOLTIP: str = "#1D1D1D"
+    BG_TOOLTIP: str = "#141414"
     BG_SELECTION: str = "#FF6600"
-    BG_BADGE: str = "#121212"
+    BG_BADGE: str = "#141414"
 
-    ICON_BORDER: str = "rgba(0, 0, 0, 40)"
-    ICON_TEXT_SHADOW: str = "rgba(0, 0, 0, 180)"
+    ICON_BORDER: str = "rgba(255, 255, 255, 0.05)"
+    ICON_TEXT_SHADOW: str = "rgba(0, 0, 0, 0.72)"
 
-    STATUS_RUNNING: str = "#35C46A"
-    STATUS_ERROR: str = "#E15A36"
-    STATUS_STOPPED: str = "#6F757C"
+    STATUS_RUNNING: str = "#FF6600"
+    STATUS_ERROR: str = "#FF6600"
+    STATUS_STOPPED: str = "#5A5A5A"
     STATUS_PAUSED: str = "#FF6600"
-    STATUS_BUFFERING: str = "#E7A33D"
+    STATUS_BUFFERING: str = "#878787"
     STATUS_LOADING: str = "#FF6600"
-    STATUS_COMPLETED: str = "#35C46A"
+    STATUS_COMPLETED: str = "#FF6600"
 
-    SCROLLBAR_BG: str = "#101010"
-    SCROLLBAR_HANDLE: str = "#3A3A3A"
+    SCROLLBAR_BG: str = "#141414"
+    SCROLLBAR_HANDLE: str = "#5A5A5A"
 
-    FONT_FAMILY: str = "Noto Sans"
-    FONT_FAMILY_MONO: str = "Sarasa Mono SC"
+    FONT_FAMILY: str = "Inter"
+    FONT_FAMILY_MONO: str = "ui-monospace"
     FONT_SIZE: int = 13
 
-    ANIM_DURATION_MS: int = 150
-    ANIM_PULSE_PERIOD_MS: int = 1500
+    ANIM_DURATION_MS: int = 180
+    ANIM_PULSE_PERIOD_MS: int = 0

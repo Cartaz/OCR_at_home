@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="it">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' qrc: data:; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' qrc:;">
+    <title>GLM OCR</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="qrc:///qtwebchannel/qwebchannel.js" defer></script>
+    <script src="app.js" defer></script>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" aria-label="Navigazione principale">
+            <header class="brand" aria-label="GLM OCR">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5M8 12h8M8 16h8"/></svg>
+                </span>
+                <span class="brand-copy">
+                    <strong>GLM OCR</strong>
+                    <small>Local · SYCL</small>
+                </span>
+            </header>
+
+            <nav class="nav-list" aria-label="Sezioni">
+                <button class="nav-item active" type="button" data-view="ocr" aria-current="page" title="OCR singolo">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3M8 8h8v8H8z"/></svg>
+                    <span>OCR</span>
+                </button>
+                <button class="nav-item" type="button" data-view="batch" title="Elaborazione batch">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v4H7zM5 8h14v5H5zM3 14h18v7H3z"/></svg>
+                    <span>Batch</span>
+                </button>
+                <button class="nav-item" type="button" data-view="logs" title="Log applicazione">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>
+                    <span>Log</span>
+                </button>
+                <button class="nav-item" type="button" data-view="settings" title="Impostazioni">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.4 3.1a7 7 0 0 0-1.7 1L5 6.1 3 9.5 5 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 3.1h5l.4-3.1a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z"/></svg>
+                    <span>Impostazioni</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="compact-status" id="sidebar-status" aria-live="polite">
+                    <span class="status-dot" id="sidebar-status-dot" aria-hidden="true"></span>
+                    <span id="sidebar-status-text">Avvio…</span>
+                </div>
+                <button class="icon-button" id="quit-button" type="button" title="Esci da GLM OCR" aria-label="Esci da GLM OCR">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M14 8l4 4-4 4M18 12H9"/></svg>
+                </button>
+            </div>
+        </aside>
+
+        <div class="workspace">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">GLM-OCR · llama.cpp</p>
+                    <h1 id="view-title">Riconoscimento OCR</h1>
+                </div>
+                <div class="topbar-actions">
+                    <div class="top-status" id="model-status" aria-live="polite">
+                        <span class="status-dot" aria-hidden="true"></span>
+                        <span id="model-status-text">Backend in verifica</span>
+                    </div>
+                    <button class="icon-button hidden" id="global-cancel-button" type="button" title="Annulla operazione in corso" aria-label="Annulla operazione in corso">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10"/></svg>
+                    </button>
+                </div>
+            </header>
+
+            <div class="notice hidden" id="notice" role="status" aria-live="polite">
+                <div class="notice-copy">
+                    <strong id="notice-title">Informazione</strong>
+                    <span id="notice-message"></span>
+                </div>
+                <details id="notice-details-wrap" class="notice-details hidden">
+                    <summary>Dettagli tecnici</summary>
+                    <pre id="notice-details"></pre>
+                </details>
+                <button class="icon-button compact" id="notice-close" type="button" aria-label="Chiudi messaggio">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+            </div>
+
+            <main class="content">
+                <section class="view active" id="view-ocr" data-title="Riconoscimento OCR" aria-labelledby="ocr-heading">
+                    <div class="section-heading">
+                        <div>
+                            <h2 id="ocr-heading">Documento singolo</h2>
+                            <p>Immagine o PDF, elaborazione locale sul backend SYCL.</p>
+                        </div>
+                        <span class="operation-label" id="ocr-operation-label">In attesa</span>
+                    </div>
+
+                    <div class="panel raised file-panel">
+                        <label class="field-label" for="single-file-display">Documento</label>
+                        <div class="file-row">
+                            <div class="inset-field file-display" id="single-file-display" role="textbox" aria-readonly="true" tabindex="0">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5zM15 3v5h5"/></svg>
+                                <span id="single-file-name">Nessun file selezionato</span>
+                            </div>
+                            <button class="button" id="single-file-button" type="button">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6l2 2h8v11H4z"/></svg>
+                                Scegli file
+                            </button>
+                        </div>
+                        <div class="action-row">
+                            <button class="button primary-action" id="single-start-button" type="button" disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>
+                                Avvia OCR
+                            </button>
+                            <button class="button" id="single-cancel-button" type="button" disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10"/></svg>
+                                Annulla
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="progress-block hidden" id="single-progress-block" aria-live="polite">
+                        <div class="progress-copy">
+                            <span id="single-progress-label">Elaborazione…</span>
+                            <span id="single-progress-value"></span>
+                        </div>
+                        <div class="progress-track" id="single-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <span class="progress-fill"></span>
+                        </div>
+                    </div>
+
+                    <div class="panel raised result-panel">
+                        <div class="panel-toolbar">
+                            <div>
+                                <span class="field-label">Testo riconosciuto</span>
+                                <div class="result-meta" id="single-result-meta">Il risultato apparirà qui.</div>
+                            </div>
+                            <button class="icon-button" id="copy-single-button" type="button" title="Copia testo" aria-label="Copia testo" disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v12H8zM5 4h10v4M5 4v12h3"/></svg>
+                            </button>
+                        </div>
+                        <pre class="result-view inset" id="single-result" tabindex="0">Nessun risultato.</pre>
+                    </div>
+                </section>
+
+                <section class="view" id="view-batch" data-title="Elaborazione batch" aria-labelledby="batch-heading">
+                    <div class="section-heading">
+                        <div>
+                            <h2 id="batch-heading">Batch OCR</h2>
+                            <p>Elaborazione sequenziale di più documenti, con cancellazione reale.</p>
+                        </div>
+                        <span class="operation-label" id="batch-operation-label">In attesa</span>
+                    </div>
+
+                    <div class="panel raised file-panel">
+                        <div class="panel-toolbar">
+                            <div>
+                                <span class="field-label">Coda documenti</span>
+                                <div class="result-meta" id="batch-count-label">0 file selezionati</div>
+                            </div>
+                            <button class="button" id="batch-file-button" type="button">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6l2 2h8v11H4zM12 11v6M9 14h6"/></svg>
+                                Scegli file
+                            </button>
+                        </div>
+                        <ul class="batch-list inset" id="batch-file-list" aria-label="File del batch">
+                            <li class="empty-row">Nessun documento in coda.</li>
+                        </ul>
+                        <div class="action-row">
+                            <button class="button primary-action" id="batch-start-button" type="button" disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>
+                                Avvia batch
+                            </button>
+                            <button class="button" id="batch-cancel-button" type="button" disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10"/></svg>
+                                Annulla
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="progress-block hidden" id="batch-progress-block" aria-live="polite">
+                        <div class="progress-copy">
+                            <span id="batch-progress-label">Batch in corso</span>
+                            <span id="batch-progress-value">0 / 0</span>
+                        </div>
+                        <div class="progress-track" id="batch-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <span class="progress-fill"></span>
+                        </div>
+                    </div>
+
+                    <div class="panel raised result-panel">
+                        <div class="panel-toolbar">
+                            <div>
+                                <span class="field-label">Risultati batch</span>
+                                <div class="result-meta">Ogni risultato resta associato al file sorgente.</div>
+                            </div>
+                        </div>
+                        <div class="batch-results inset" id="batch-results">
+                            <p class="empty-copy">Nessun risultato.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-logs" data-title="Log applicazione" aria-labelledby="logs-heading">
+                    <div class="section-heading">
+                        <div>
+                            <h2 id="logs-heading">Log</h2>
+                            <p>Ultime righe del log applicativo, senza alterare il livello di logging.</p>
+                        </div>
+                    </div>
+                    <div class="panel raised log-panel">
+                        <div class="panel-toolbar">
+                            <div class="inline-controls">
+                                <button class="button" id="log-refresh-button" type="button">
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 7M19 4v4h-4"/></svg>
+                                    Aggiorna
+                                </button>
+                                <label class="check-control" for="log-autoscroll">
+                                    <input id="log-autoscroll" type="checkbox" checked>
+                                    <span>Auto-scroll</span>
+                                </label>
+                            </div>
+                            <button class="icon-button" id="copy-log-button" type="button" title="Copia log" aria-label="Copia log">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v12H8zM5 4h10v4M5 4v12h3"/></svg>
+                            </button>
+                        </div>
+                        <pre class="log-view inset" id="log-output" tabindex="0">Log non ancora caricato.</pre>
+                    </div>
+                </section>
+
+                <section class="view" id="view-settings" data-title="Impostazioni" aria-labelledby="settings-heading">
+                    <div class="section-heading">
+                        <div>
+                            <h2 id="settings-heading">Impostazioni e backend</h2>
+                            <p>Preferenze persistenti e stato reale del runtime SYCL.</p>
+                        </div>
+                    </div>
+
+                    <div class="settings-grid">
+                        <section class="panel raised" aria-labelledby="backend-heading">
+                            <div class="panel-toolbar">
+                                <div>
+                                    <span class="field-label" id="backend-heading">Backend di calcolo</span>
+                                    <div class="result-meta">GLM OCR è configurato esclusivamente per llama.cpp + SYCL.</div>
+                                </div>
+                                <span class="status-chip" id="backend-chip">Verifica</span>
+                            </div>
+                            <dl class="detail-list">
+                                <div><dt>Device</dt><dd id="backend-device">llama-cpp-sycl</dd></div>
+                                <div><dt>Disponibilità</dt><dd id="backend-availability">In verifica</dd></div>
+                                <div><dt>Modello</dt><dd id="model-cache-path">—</dd></div>
+                            </dl>
+                            <div class="action-row">
+                                <button class="button" id="hardware-refresh-button" type="button">Rileva hardware</button>
+                                <button class="button" id="model-reload-button" type="button">Ricarica modello</button>
+                            </div>
+                        </section>
+
+                        <form class="panel raised settings-form" id="settings-form">
+                            <div class="setting-row">
+                                <div>
+                                    <label class="field-label" for="preprocess-toggle">Pre-elaborazione immagine</label>
+                                    <p>Migliora contrasto e leggibilità prima dell'inferenza.</p>
+                                </div>
+                                <label class="toggle" for="preprocess-toggle">
+                                    <input id="preprocess-toggle" type="checkbox">
+                                    <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+                                    <span class="sr-only">Abilita pre-elaborazione</span>
+                                </label>
+                            </div>
+
+                            <div class="form-field">
+                                <label class="field-label" for="language-input">Lingua OCR configurata</label>
+                                <div class="inset-field text-field">
+                                    <input id="language-input" type="text" autocomplete="off" spellcheck="false">
+                                </div>
+                                <p class="field-help">Preferenza persistente; il prompt GLM-OCR attuale resta neutro.</p>
+                            </div>
+
+                            <div class="form-field">
+                                <label class="field-label" for="confidence-input">Soglia confidenza</label>
+                                <div class="range-row">
+                                    <input id="confidence-input" type="range" min="0" max="1" step="0.05">
+                                    <output id="confidence-output" for="confidence-input">0.50</output>
+                                </div>
+                                <p class="field-help">Valore persistente disponibile alle integrazioni; non filtra automaticamente il testo.</p>
+                            </div>
+
+                            <div class="form-field">
+                                <label class="field-label" for="output-dir-input">Directory output configurata</label>
+                                <div class="file-row">
+                                    <div class="inset-field text-field grow">
+                                        <input id="output-dir-input" type="text" autocomplete="off" spellcheck="false">
+                                    </div>
+                                    <button class="icon-button" id="output-dir-button" type="button" title="Scegli directory" aria-label="Scegli directory output">
+                                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6l2 2h8v11H4z"/></svg>
+                                    </button>
+                                </div>
+                                <p class="field-help">Il core conserva questa preferenza; il viewer non salva file automaticamente.</p>
+                            </div>
+
+                            <div class="action-row end">
+                                <button class="button primary-action" id="settings-save-button" type="submit">Salva impostazioni</button>
+                            </div>
+                        </form>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+</body>
+</html>

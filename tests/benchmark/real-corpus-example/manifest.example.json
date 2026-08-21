@@ -1,0 +1,16 @@
+[
+  {
+    "name": "scan-01",
+    "image": "scan-01.png",
+    "expected_text": "Trascrizione esatta del documento...",
+    "task": "text",
+    "score_mode": "cer"
+  },
+  {
+    "name": "photo-02",
+    "image": "photo-02.jpg",
+    "expected_text": "Seconda trascrizione esatta...",
+    "task": "text",
+    "score_mode": "cer"
+  }
+]

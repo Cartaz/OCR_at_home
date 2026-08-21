@@ -45,16 +45,24 @@ Goal: improve recognition quality using measured evidence rather than intuition.
   - mixed-layout pages.
 - [x] Verify GLM-OCR prompt modes against authoritative model documentation.
 - [~] Benchmark the current `OCR` prompt against official text-recognition prompt(s).
+  - [x] First hardware-backed synthetic baseline completed: both prompts reached CER 0.0000 on all four text samples.
+  - [x] Preserve the first baseline and document why its timing comparison is order-biased.
+  - [x] Add warm-up, repeated rounds, counterbalanced prompt order and paired statistics.
+  - [x] Add support for labelled real-world corpora through `manifest.json`.
+  - [ ] Run and review the counterbalanced repeated synthetic benchmark.
+  - [ ] Run and review at least one labelled real-world corpus before changing the production default.
 - [ ] Add explicit OCR modes only when benchmark evidence supports them:
   - Text;
   - Formula;
   - Table;
   - structured extraction/schema mode if supported by the active backend.
+  - First specialized baseline: table output matched all synthetic cells; formula output was broadly correct but mistranscribed the `+/-` operator, so neither mode is considered fully validated yet.
 - [ ] Reassess the language preference after prompt-mode work; either make it operational or remove it.
 
 Acceptance criteria:
 - Prompt changes have reproducible before/after results.
 - Default behavior never regresses silently.
+- A production prompt change requires both counterbalanced synthetic evidence and labelled real-world evidence.
 
 ## Phase 3 — Real output workflow
 

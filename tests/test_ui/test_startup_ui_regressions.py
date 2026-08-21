@@ -50,7 +50,7 @@ def test_language_selector_is_native_html_and_confidence_control_is_removed() ->
     assert not (WEB / "settings_ui.js").exists()
 
 
-def test_single_result_save_controls_use_real_backend_action() -> None:
+def test_single_result_and_pdf_page_save_controls_use_real_backend_actions() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
     bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
@@ -58,7 +58,31 @@ def test_single_result_save_controls_use_real_backend_action() -> None:
     assert 'src="save_ui.js"' in html
     assert 'id="save-single-txt-button"' in html
     assert 'id="save-single-md-button"' in html
+    assert 'id="save-single-pages-txt-button"' in html
+    assert 'id="save-single-pages-md-button"' in html
     assert "saveSingleResult" in save_js
-    assert "resultSourcePath === state.singlePath" in save_js
+    assert "saveSinglePdfPages" in save_js
+    assert "completedSourcePath" in save_js
     assert "def saveSingleResult" in bridge
+    assert "def saveSinglePdfPages" in bridge
     assert "write_ocr_text" in bridge
+    assert "write_ocr_pages" in bridge
+
+
+def test_batch_autosave_controls_are_native_and_persistent() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
+    settings = (ROOT / "config" / "settings.py").read_text(encoding="utf-8")
+    bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
+
+    assert 'id="batch-auto-save-toggle"' in html
+    assert 'id="batch-output-format"' in html
+    assert 'id="batch-pdf-pages-toggle"' in html
+    assert "batch_auto_save" in settings
+    assert "batch_output_format" in settings
+    assert "batch_save_pdf_pages" in settings
+    assert "payload.batch_auto_save" in save_js
+    assert "payload.batch_output_format" in save_js
+    assert "payload.batch_save_pdf_pages" in save_js
+    assert "_snapshot_batch_output" in bridge
+    assert "batch_output_summary" in bridge

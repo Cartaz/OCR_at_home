@@ -39,6 +39,9 @@ class Settings:
     language: str = OCRDefaults.DEFAULT_OCR_LANGUAGE
     output_dir: str = str(Path.home() / "Documents" / "glm-ocr-output")
     preprocessing_enabled: bool = True
+    batch_auto_save: bool = False
+    batch_output_format: str = "txt"
+    batch_save_pdf_pages: bool = False
     model_path: str = str(AppMeta.GGUF_MODEL_DIR)
     window_width: int = UIConstraints.WINDOW_WIDTH
     window_height: int = UIConstraints.WINDOW_HEIGHT
@@ -83,6 +86,14 @@ class Settings:
                     configured,
                     ComputeDevice.LLAMA_CPP_SYCL.value,
                 )
+
+            output_format = str(filtered.get("batch_output_format", "txt")).lower()
+            filtered["batch_output_format"] = (
+                output_format if output_format in {"txt", "md"} else "txt"
+            )
+            for key in ("batch_auto_save", "batch_save_pdf_pages"):
+                if key in filtered and not isinstance(filtered[key], bool):
+                    filtered.pop(key)
 
             settings = cls(**filtered)
             logger.info(

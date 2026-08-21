@@ -138,6 +138,8 @@
                             <div class="inline-controls">
                                 <button class="button" id="save-single-txt-button" type="button" title="Salva come TXT" disabled>TXT</button>
                                 <button class="button" id="save-single-md-button" type="button" title="Salva come Markdown" disabled>MD</button>
+                                <button class="button hidden" id="save-single-pages-txt-button" type="button" title="Salva ogni pagina PDF come TXT" disabled>TXT pagine</button>
+                                <button class="button hidden" id="save-single-pages-md-button" type="button" title="Salva ogni pagina PDF come Markdown" disabled>MD pagine</button>
                                 <button class="icon-button" id="copy-single-button" type="button" title="Copia testo" aria-label="Copia testo" disabled>
                                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v12H8zM5 4h10v4M5 4v12h3"/></svg>
                                 </button>
@@ -296,7 +298,42 @@
                                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6l2 2h8v11H4z"/></svg>
                                     </button>
                                 </div>
-                                <p class="field-help">I risultati salvati in TXT o Markdown vengono scritti qui. I file esistenti non vengono sovrascritti.</p>
+                                <p class="field-help">I risultati manuali e gli output batch automatici vengono scritti qui. I file esistenti non vengono sovrascritti.</p>
+                            </div>
+
+                            <div class="setting-row">
+                                <div>
+                                    <label class="field-label" for="batch-auto-save-toggle">Salvataggio automatico batch</label>
+                                    <p>Salva ogni documento completato senza attendere la fine dell'intero batch.</p>
+                                </div>
+                                <label class="toggle" for="batch-auto-save-toggle">
+                                    <input id="batch-auto-save-toggle" type="checkbox">
+                                    <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+                                    <span class="sr-only">Abilita salvataggio automatico batch</span>
+                                </label>
+                            </div>
+
+                            <div class="form-field" id="batch-output-format-field">
+                                <label class="field-label" for="batch-output-format">Formato output batch</label>
+                                <div class="inset-field text-field language-select-field">
+                                    <select id="batch-output-format" aria-label="Formato output batch">
+                                        <option value="txt">TXT</option>
+                                        <option value="md">Markdown</option>
+                                    </select>
+                                    <span class="select-chevron" aria-hidden="true">⌄</span>
+                                </div>
+                            </div>
+
+                            <div class="setting-row" id="batch-pdf-pages-row">
+                                <div>
+                                    <label class="field-label" for="batch-pdf-pages-toggle">Pagine PDF separate nel batch</label>
+                                    <p>Oltre al file combinato, salva un file numerato per ogni pagina PDF.</p>
+                                </div>
+                                <label class="toggle" for="batch-pdf-pages-toggle">
+                                    <input id="batch-pdf-pages-toggle" type="checkbox">
+                                    <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+                                    <span class="sr-only">Salva pagine PDF separate nel batch</span>
+                                </label>
                             </div>
 
                             <div class="action-row end">

@@ -72,18 +72,24 @@ Goal: turn OCR results into durable files without inventing behavior that does n
 
 - [x] Add `Save result` for single OCR.
 - [x] Support `.txt` and `.md` output.
-- [ ] Add optional automatic batch saving to configured output directory.
+- [x] Add optional automatic batch saving to configured output directory.
+  - Each completed task is persisted immediately rather than waiting for the whole batch.
+  - Output directory, format and PDF-page policy are frozen at batch start for consistency.
 - [x] Use source-derived filenames and safe collision handling.
 - [x] Use atomic publication; never silently overwrite existing files.
-- [~] PDF output workflow.
+- [x] PDF output workflow.
   - [x] Save the combined OCR result for a PDF as one `.txt` or `.md` file.
-  - [ ] Optionally save one file per PDF page.
+  - [x] Optionally save one numbered file per PDF page for single OCR and batch OCR.
 - [x] Make the output-directory setting operational and update its UI description accordingly.
+- [x] Reject manual save actions for cancelled, failed or otherwise incomplete single OCR results.
 
 Acceptance criteria:
 - Every save action reports success/failure truthfully.
 - Existing files are never destroyed without explicit user intent.
 - A newly selected source cannot accidentally save the previous document's OCR text under its filename.
+- A partial/cancelled PDF cannot be presented as a completed savable result.
+- One running batch cannot silently switch output directory/format because settings changed mid-run.
+- Output controls execute successfully in the real Qt WebEngine smoke test.
 
 ## Phase 4 — Model memory management
 

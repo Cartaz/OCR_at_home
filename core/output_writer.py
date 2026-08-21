@@ -10,9 +10,11 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Sequence
 
 SUPPORTED_TEXT_FORMATS = {"txt", "md"}
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_PDF_PAGE_MARKER = re.compile(r"(?m)^--- Pagina (\d+) ---\n")
 
 
 def safe_source_stem(source_path: str | Path) -> str:
@@ -28,38 +30,62 @@ def safe_source_stem(source_path: str | Path) -> str:
     return stem or "ocr-result"
 
 
+def split_combined_pdf_text(combined_text: str) -> list[str]:
+    """Recover page texts from the deterministic combined PDF representation.
+
+    Multi-page OCR output is produced internally as ``--- Pagina N ---`` blocks.
+    Marker numbering is validated before splitting; malformed or ambiguous data is
+    rejected rather than silently producing incorrectly numbered page files.
+    A single-page PDF has no marker and is therefore represented by one element.
+    """
+    text = str(combined_text)
+    matches = list(_PDF_PAGE_MARKER.finditer(text))
+    if not matches:
+        return [text]
+
+    numbers = [int(match.group(1)) for match in matches]
+    expected = list(range(1, len(matches) + 1))
+    if numbers != expected:
+        raise ValueError("Output PDF combinato con marcatori pagina non validi")
+
+    pages: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        pages.append(text[start:end].strip("\n"))
+    return pages
+
+
+def _normalize_format(file_format: str) -> str:
+    fmt = str(file_format).strip().lower().lstrip(".")
+    if fmt not in SUPPORTED_TEXT_FORMATS:
+        raise ValueError(f"Formato output non supportato: {file_format}")
+    return fmt
+
+
 def _candidate_path(directory: Path, stem: str, suffix: str, index: int) -> Path:
     name = f"{stem}{suffix}" if index == 1 else f"{stem}-{index}{suffix}"
     return directory / name
 
 
-def write_ocr_text(
-    output_dir: str | Path,
-    source_path: str | Path,
-    text: str,
-    file_format: str,
-) -> Path:
-    """Atomically publish OCR text without ever overwriting an existing file.
-
-    The complete temporary file is hard-linked into place. ``os.link`` is
-    atomic and fails if the destination already exists, so a concurrent writer
-    cannot be overwritten. The temporary name is removed after publication.
-    """
-    fmt = str(file_format).strip().lower().lstrip(".")
-    if fmt not in SUPPORTED_TEXT_FORMATS:
-        raise ValueError(f"Formato output non supportato: {file_format}")
-
-    content = str(text)
-    if not content.strip():
-        raise ValueError("Nessun testo OCR da salvare")
-
+def _prepare_output_directory(output_dir: str | Path) -> Path:
     directory = Path(output_dir).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
     if not directory.is_dir():
         raise OSError(f"Directory output non valida: {directory}")
+    return directory
 
-    stem = safe_source_stem(source_path)
-    suffix = f".{fmt}"
+
+def _write_atomic_unique(
+    directory: Path,
+    stem: str,
+    content: str,
+    suffix: str,
+    *,
+    allow_empty: bool = False,
+) -> Path:
+    if not allow_empty and not content.strip():
+        raise ValueError("Nessun testo OCR da salvare")
 
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{stem}.",
@@ -85,8 +111,6 @@ def write_ocr_text(
             except FileExistsError:
                 index += 1
 
-        # Persist the new directory entry where supported. Failure to fsync the
-        # directory is non-fatal on platforms that do not expose directory fds.
         try:
             dir_fd = os.open(directory, os.O_RDONLY)
         except OSError:
@@ -105,3 +129,48 @@ def write_ocr_text(
             temp_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def write_ocr_text(
+    output_dir: str | Path,
+    source_path: str | Path,
+    text: str,
+    file_format: str,
+) -> Path:
+    """Atomically publish OCR text without ever overwriting an existing file."""
+    fmt = _normalize_format(file_format)
+    directory = _prepare_output_directory(output_dir)
+    return _write_atomic_unique(
+        directory,
+        safe_source_stem(source_path),
+        str(text),
+        f".{fmt}",
+    )
+
+
+def write_ocr_pages(
+    output_dir: str | Path,
+    source_path: str | Path,
+    page_texts: Sequence[str],
+    file_format: str,
+) -> list[Path]:
+    """Publish one collision-safe output file per PDF page."""
+    if isinstance(page_texts, (str, bytes)) or not page_texts:
+        raise ValueError("Nessuna pagina PDF da salvare")
+
+    fmt = _normalize_format(file_format)
+    directory = _prepare_output_directory(output_dir)
+    base_stem = safe_source_stem(source_path)
+    width = max(3, len(str(len(page_texts))))
+    outputs: list[Path] = []
+    for page_num, page_text in enumerate(page_texts, start=1):
+        outputs.append(
+            _write_atomic_unique(
+                directory,
+                f"{base_stem}-page-{page_num:0{width}d}",
+                str(page_text),
+                f".{fmt}",
+                allow_empty=True,
+            )
+        )
+    return outputs

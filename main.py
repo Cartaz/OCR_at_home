@@ -101,7 +101,10 @@ def main() -> None:
     app.setApplicationName(AppMeta.NAME)
     app.setApplicationDisplayName(AppMeta.NAME)
     app.setOrganizationName(AppMeta.ID)
-    app.setQuitOnLastWindowClosed(False)
+    # Closing the main window is a real application exit.  Keeping the event
+    # loop alive just because a tray icon exists leaves the owned llama-server
+    # resident in RAM with no visible application window.
+    app.setQuitOnLastWindowClosed(True)
     app.setStyleSheet(_native_aux_stylesheet())
 
     controller = AppController(settings=settings)
@@ -143,15 +146,14 @@ def main() -> None:
     )
     if tray.available:
         tray.show()
-        window.hide_on_close = True
         tray.show_window_requested.connect(bridge.showWindow)
         tray.cancel_requested.connect(bridge.cancelOperation)
         tray.quit_requested.connect(bridge.forceQuit)
-    else:
-        app.setQuitOnLastWindowClosed(True)
-        window.hide_on_close = False
 
+    # Primary cleanup path: Qt emits aboutToQuit for window close, tray Exit,
+    # SIGINT/SIGTERM and explicit QApplication.quit().
     app.aboutToQuit.connect(bridge.shutdown)
+    app.aboutToQuit.connect(tray.hide)
     ui_ready_logged = False
 
     def on_load_finished(ok: bool) -> None:
@@ -170,7 +172,17 @@ def main() -> None:
 
     window.loadFinished.connect(on_load_finished)
     window.show()
-    raise SystemExit(app.exec())
+
+    exit_code = 0
+    try:
+        exit_code = app.exec()
+    finally:
+        # Defensive cleanup if the event loop returns through an unusual path
+        # without delivering aboutToQuit.  WebBridge.shutdown is idempotent.
+        bridge.shutdown()
+        tray.hide()
+        _controller_ref[0] = None
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ Goal: make every value and control shown by the application truthful, then remov
 - [x] Consolidate the non-blocking WebEngine startup into `WebBridge`.
   - Preserve immediate first-frame rendering.
   - Remove `ResponsiveWebBridge` once equivalent behavior is covered by tests.
-- [ ] Make the language selector native HTML rather than post-load DOM injection.
+- [x] Make the language selector native HTML rather than post-load DOM injection.
   - Preserve Italiano / English / Italiano + English choices.
   - Keep the UI explicit that language is not currently forced in the GLM-OCR prompt.
   - Remove `settings_ui.js` after equivalent markup/style is integrated.

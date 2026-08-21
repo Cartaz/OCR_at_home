@@ -21,24 +21,47 @@ Sources:
 
 The official self-hosted config also uses task-specific prompts after layout analysis. This project currently sends a whole image/page directly to GLM-OCR through llama.cpp, so specialized table/formula results are recorded for inspection but are not treated as equivalent to the complete upstream layout pipeline.
 
-## Methodology
+## What the hardware baselines established
 
-The first hardware run produced a quality tie on the synthetic text corpus, but its timing was order-biased because every `OCR` request ran before every `Text Recognition:` request. That result is preserved under `baselines/` and is deliberately **not** used to change the production default.
+Two synthetic hardware runs are preserved under `baselines/`.
 
-The current runner removes that weakness by:
+The first run showed a quality tie but had obvious warm/order bias. The second repeated run again produced a perfect quality tie: every recorded text request from both `OCR` and `Text Recognition:` reached CER `0.0000`.
 
-- performing unrecorded warm-up requests for both text prompts;
-- repeating the comparison for multiple rounds;
-- alternating which prompt runs first for each sample;
-- reversing sample order on alternating rounds;
-- calculating both aggregate and paired timing statistics;
-- keeping CER comparisons paired by identical sample and round.
+The second run also exposed a strong llama-server cache effect for repeated identical images: a first request could take roughly 20–37 seconds while the immediately repeated request could complete around 1–1.6 seconds. Therefore repeated-image wall-clock measurements are **not valid evidence of intrinsic prompt speed**.
 
-Default settings are one warm-up round and three recorded rounds.
+For prompt selection, this benchmark now treats:
+
+- CER / labelled output quality as decision evidence;
+- elapsed time as diagnostic metadata only.
+
+## Canonical runner
+
+Use `run_prompt_benchmark.py`. It fixes the per-sample counterbalancing bug found in the second baseline: every individual sample alternates which prompt runs first between rounds, independent of reversed traversal order.
+
+From the repository root:
+
+```bash
+.venv/bin/python tests/benchmark/run_prompt_benchmark.py --specialized
+```
+
+Defaults are one unrecorded warm-up round and two recorded quality rounds. Two rounds are enough for first-order per-sample counterbalancing; more rounds can be requested when useful:
+
+```bash
+.venv/bin/python tests/benchmark/run_prompt_benchmark.py \
+  --rounds 4 \
+  --warmup-rounds 1 \
+  --specialized
+```
+
+The runner creates and owns a `LlamaServerBackend`, starts the same SYCL/full-offload runtime used by the application, performs the benchmark, then shuts the process down in `finally`.
+
+Do not keep the desktop application open while using this mode if RAM/VRAM is tight.
+
+`benchmark_prompt_quality.py` remains the helper/library containing deterministic corpus generation, CER and manifest-loading functions. Its historical CLI output is preserved for reproducibility of the recorded baselines, but it is no longer the canonical decision runner.
 
 ## Synthetic corpus
 
-Without extra arguments, `benchmark_prompt_quality.py` creates a deterministic synthetic corpus at runtime, so no binary fixtures need to be committed. It covers:
+Without extra arguments, the canonical runner generates the deterministic synthetic corpus at runtime. It covers:
 
 - clean printed text;
 - small text;
@@ -49,31 +72,12 @@ Without extra arguments, `benchmark_prompt_quality.py` creates a deterministic s
 
 Text-oriented samples are scored with character error rate (CER) after conservative whitespace normalization. Table and formula samples can also be run with their official prompts and are stored as raw outputs for manual inspection.
 
-## Run the counterbalanced benchmark
-
-From the repository root:
-
-```bash
-.venv/bin/python tests/benchmark/benchmark_prompt_quality.py --specialized
-```
-
-This now performs three counterbalanced rounds by default. To change the repetition count:
-
-```bash
-.venv/bin/python tests/benchmark/benchmark_prompt_quality.py \
-  --rounds 2 \
-  --warmup-rounds 1 \
-  --specialized
-```
-
-The runner creates and owns a `LlamaServerBackend`, starts the same SYCL/full-offload runtime used by the application, performs the benchmark, then shuts the process down in `finally`.
-
-Do not keep the desktop application open while using this mode if RAM/VRAM is tight.
+The synthetic text comparison is now considered a quality tie. Further synthetic repetition is not required before moving to real documents.
 
 ## Run against an already-running compatible server
 
 ```bash
-.venv/bin/python tests/benchmark/benchmark_prompt_quality.py \
+.venv/bin/python tests/benchmark/run_prompt_benchmark.py \
   --server-url http://127.0.0.1:PORT
 ```
 
@@ -81,7 +85,7 @@ In this mode the benchmark does not create or terminate the supplied server.
 
 ## Real-world labelled corpus
 
-Synthetic pages are useful for deterministic regressions but are too easy to decide a production OCR prompt. The runner can therefore consume a directory of real images with a `manifest.json`:
+Synthetic pages are deterministic but too easy to decide a production OCR prompt. The runner can consume a directory of real images with a `manifest.json`:
 
 ```text
 my-real-corpus/
@@ -113,9 +117,9 @@ Example manifest:
 Run it with:
 
 ```bash
-.venv/bin/python tests/benchmark/benchmark_prompt_quality.py \
+.venv/bin/python tests/benchmark/run_prompt_benchmark.py \
   --corpus-dir /percorso/my-real-corpus \
-  --rounds 3
+  --rounds 2
 ```
 
 Supported `task` values are `text`, `table`, and `formula`; supported `score_mode` values are `cer` and `manual`. The prompt comparison itself uses `task=text` samples. Paths in the manifest are constrained to the corpus directory.
@@ -127,7 +131,7 @@ Supported `task` values are `text`, `table`, and `formula`; supported `score_mod
 - table samples with `Table Recognition:`;
 - formula samples with `Formula Recognition:`.
 
-These raw results are evidence for later UI/task-mode work, not an automatic production default change. The first formula probe already demonstrated why this distinction matters: broadly correct LaTeX-like output still contained an operator transcription error.
+The two synthetic table probes have been structurally correct. The formula probe repeated an operator transcription error (`+/-` rendered as `+ / -`), so formula mode is not yet considered validated.
 
 ## Output
 
@@ -137,15 +141,13 @@ By default results are written under:
 benchmark-results/glm-ocr-prompts-YYYYMMDD-HHMMSS/
 ```
 
-The directory contains generated corpus images (for synthetic mode), `corpus.json`, and `results.json` with:
+`results.json` contains:
 
-- per-sample output;
-- elapsed time;
+- per-sample model output;
+- raw elapsed time for diagnostics;
 - CER where applicable;
 - round and execution sequence;
-- aggregate mean/median statistics;
-- paired `Text Recognition:` minus `OCR` timing and CER deltas.
+- an accuracy-only `quality_summary`;
+- an explicit `timing_interpretation` warning that repeated-input timings may be cache-accelerated.
 
-A negative paired timing delta means the candidate prompt was faster for the same sample/round. A negative paired CER delta means the candidate prompt had lower error.
-
-The production default remains `OCR` until repeated and real-world benchmark evidence is reviewed and the roadmap item is explicitly completed.
+The production default remains `OCR` until labelled real-world evidence is reviewed and the roadmap item is explicitly completed.

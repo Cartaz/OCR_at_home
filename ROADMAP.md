@@ -36,15 +36,15 @@ Acceptance criteria:
 
 Goal: improve recognition quality using measured evidence rather than intuition.
 
-- [ ] Build a small repeatable OCR evaluation corpus covering:
+- [x] Build a small repeatable OCR evaluation corpus covering:
   - clean printed text;
   - small text;
   - scans/noisy pages;
   - tables;
   - formulas;
   - mixed-layout pages.
-- [ ] Verify GLM-OCR prompt modes against authoritative model documentation.
-- [ ] Benchmark the current `OCR` prompt against official text-recognition prompt(s).
+- [x] Verify GLM-OCR prompt modes against authoritative model documentation.
+- [~] Benchmark the current `OCR` prompt against official text-recognition prompt(s).
 - [ ] Add explicit OCR modes only when benchmark evidence supports them:
   - Text;
   - Formula;

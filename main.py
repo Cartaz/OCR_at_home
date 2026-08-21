@@ -17,8 +17,8 @@ from config.constants import AppMeta
 from config.settings import Settings
 from config.theme import ThemeColors
 from core.app_controller import AppController
-from ui.responsive_web_bridge import ResponsiveWebBridge
 from ui.tray_icon import TrayIcon
+from ui.web_bridge import WebBridge
 from ui.window import MainWindow
 
 _controller_ref: list[AppController | None] = [None]
@@ -101,10 +101,7 @@ def main() -> None:
     app.setApplicationName(AppMeta.NAME)
     app.setApplicationDisplayName(AppMeta.NAME)
     app.setOrganizationName(AppMeta.ID)
-    # Closing the main window is a real application exit.  Keeping the event
-    # loop alive just because a tray icon exists leaves the owned llama-server
-    # resident in RAM with no visible application window.
-    app.setQuitOnLastWindowClosed(True)
+    app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(_native_aux_stylesheet())
 
     controller = AppController(settings=settings)
@@ -135,7 +132,7 @@ def main() -> None:
         app.setWindowIcon(icon)
         window.setWindowIcon(icon)
 
-    bridge = ResponsiveWebBridge(controller, window=window, parent=window)
+    bridge = WebBridge(controller, window=window, parent=window)
     channel = QWebChannel(window.page())
     channel.registerObject("backend", bridge)
     window.page().setWebChannel(channel)
@@ -150,10 +147,13 @@ def main() -> None:
         tray.cancel_requested.connect(bridge.cancelOperation)
         tray.quit_requested.connect(bridge.forceQuit)
 
-    # Primary cleanup path: Qt emits aboutToQuit for window close, tray Exit,
-    # SIGINT/SIGTERM and explicit QApplication.quit().
-    app.aboutToQuit.connect(bridge.shutdown)
+    # Closing the main window means closing the application. The tray remains
+    # useful while the app is open but never keeps llama-server resident after
+    # the window has been closed.
+    app.setQuitOnLastWindowClosed(True)
+
     app.aboutToQuit.connect(tray.hide)
+    app.aboutToQuit.connect(bridge.shutdown)
     ui_ready_logged = False
 
     def on_load_finished(ok: bool) -> None:
@@ -163,7 +163,9 @@ def main() -> None:
             return
         if settings_ui_path.is_file():
             try:
-                window.page().runJavaScript(settings_ui_path.read_text(encoding="utf-8"))
+                window.page().runJavaScript(
+                    settings_ui_path.read_text(encoding="utf-8")
+                )
             except OSError:
                 logger.exception("Impossibile applicare gli affinamenti UI")
         if not ui_ready_logged:
@@ -173,15 +175,15 @@ def main() -> None:
     window.loadFinished.connect(on_load_finished)
     window.show()
 
-    exit_code = 0
+    exit_code = 1
     try:
         exit_code = app.exec()
     finally:
-        # Defensive cleanup if the event loop returns through an unusual path
-        # without delivering aboutToQuit.  WebBridge.shutdown is idempotent.
+        # Defensive second line of cleanup: shutdown is idempotent, and this
+        # also covers event-loop exits that bypass a normal aboutToQuit path.
         bridge.shutdown()
         tray.hide()
-        _controller_ref[0] = None
+        _shutdown_controller_ref()
     raise SystemExit(exit_code)
 
 

@@ -3,8 +3,16 @@
 Tests:
     - StatusEnum ha tutti gli stati richiesti
     - BatchOCRJob calcola correttamente completed_count e total_count
+    - OCRResult non inventa una confidenza quando il backend non la fornisce
 """
-from core.models import StatusEnum, BatchOCRJob, OCRTask, TaskStatus, JobStatus
+from core.models import (
+    BatchOCRJob,
+    JobStatus,
+    OCRResult,
+    OCRTask,
+    StatusEnum,
+    TaskStatus,
+)
 
 
 def test_status_enum_has_required_states() -> None:
@@ -23,3 +31,8 @@ def test_batch_job_counts() -> None:
     ])
     assert job.total_count == 3
     assert job.completed_count == 1
+
+
+def test_ocr_result_confidence_is_unknown_by_default() -> None:
+    result = OCRResult(text="testo")
+    assert result.confidence is None

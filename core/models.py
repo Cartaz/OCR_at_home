@@ -60,13 +60,15 @@ class OCRResult:
 
     Attributi:
         text: Testo estratto dall'immagine.
-        confidence: Livello di confidenza da 0.0 a 1.0.
+        confidence: Confidenza reale fornita dal backend, oppure ``None`` quando
+            il backend non espone una misura affidabile. GLM-OCR via llama.cpp
+            attualmente non fornisce questo dato.
         processing_time_ms: Tempo di elaborazione in millisecondi.
-        device_used: Dispositivo utilizzato (GPU/NPU/CPU).
+        device_used: Dispositivo utilizzato.
     """
 
     text: str = ""
-    confidence: float = 0.0
+    confidence: float | None = None
     processing_time_ms: float = 0.0
     device_used: str = "CPU"
 
@@ -120,7 +122,7 @@ class BatchOCRJob:
         """Numero totale di task nel batch.
 
         Returns:
-            Conteggio totale dei task.
+            Conteggio totale di task.
         """
         return len(self.tasks)
 
@@ -131,7 +133,7 @@ class HardwareInfo:
 
     Attributi:
         device_name: Nome visualizzato del dispositivo.
-        device_type: Tipo di dispositivo (GPU/NPU/CPU).
+        device_type: Tipo di dispositivo.
         available: Se il dispositivo è disponibile e utilizzabile.
         memory_mb: Memoria disponibile in megabyte.
     """

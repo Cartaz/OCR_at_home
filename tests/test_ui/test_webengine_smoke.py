@@ -16,7 +16,7 @@ from ui.window import MainWindow
 ROOT = Path(__file__).parents[2]
 
 
-def test_main_web_frontend_loads_offscreen() -> None:
+def _load_window() -> tuple[QApplication, MainWindow]:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(ROOT / "ui" / "web")
     result: list[bool] = []
@@ -29,11 +29,56 @@ def test_main_web_frontend_loads_offscreen() -> None:
     window.loadFinished.connect(finished)
     QTimer.singleShot(5000, loop.quit)
     loop.exec()
-
     assert result == [True], "Il frontend HTML locale non è caricabile"
+    return app, window
+
+
+def _close_window(window: MainWindow) -> None:
     window.allow_close = True
     window.close()
     window.deleteLater()
+
+
+def test_main_web_frontend_loads_offscreen() -> None:
+    app, window = _load_window()
+    _close_window(window)
+    _ = app
+
+
+def test_output_settings_module_executes_in_real_webengine() -> None:
+    app, window = _load_window()
+    result: list[object] = []
+    loop = QEventLoop()
+    script = """
+        (() => {
+            applySettings({
+                preprocessing_enabled: true,
+                language: 'ita',
+                output_dir: '/tmp/glm-ocr-test',
+                batch_auto_save: true,
+                batch_output_format: 'md',
+                batch_save_pdf_pages: true
+            });
+            return [
+                document.querySelector('#batch-auto-save-toggle').checked,
+                document.querySelector('#batch-output-format').value,
+                document.querySelector('#batch-pdf-pages-toggle').checked,
+                document.querySelector('#batch-output-format').disabled,
+                document.querySelector('#save-single-pages-txt-button') !== null
+            ];
+        })();
+    """
+
+    def finished(value: object) -> None:
+        result.append(value)
+        loop.quit()
+
+    window.page().runJavaScript(script, finished)
+    QTimer.singleShot(3000, loop.quit)
+    loop.exec()
+
+    assert result == [[True, "md", True, False, True]]
+    _close_window(window)
     _ = app
 
 

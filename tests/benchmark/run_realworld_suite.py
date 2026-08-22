@@ -21,6 +21,12 @@ from tests.benchmark.ground_truth_parser import load_ground_truth  # noqa: E402
 _runner.load_ground_truth = load_ground_truth
 _runner.quality_reference = quality_reference
 _suite.quality_reference = quality_reference
+
+# Checkpoints created before the 8192-token benchmark baseline may contain
+# Stage A observations collected with ctx4096. Reject them instead of silently
+# mixing those measurements with the corrected runtime baseline.
+_runner.CHECKPOINT_SCHEMA = 3
+
 main = _runner.main
 
 

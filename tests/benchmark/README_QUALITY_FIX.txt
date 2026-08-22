@@ -1,0 +1,1 @@
+Regression context: the 2026-08-22 real DPI sweep showed that independently combining the best FACILE/MEDIO/DIFFICILE and handwriting submetrics from different DPI values creates an unattainable quality reference. The canonical runner now anchors all relative quality dimensions to one complete measured profile.

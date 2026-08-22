@@ -7,8 +7,13 @@ import json
 import numpy as np
 from PIL import Image
 
-from core import llama_ocr_api
+from core import llama_backend, llama_ocr_api
 from core.image_preprocessor import ImagePreprocessor
+from tests.benchmark.run_pipeline_benchmark import (
+    BENCHMARK_CONTEXT_SIZE,
+    BENCHMARK_MAX_IMAGE_DIM,
+    pipeline_configs,
+)
 
 
 class _FakeResponse:
@@ -63,6 +68,16 @@ def test_benchmark_can_explicitly_disable_prompt_cache(monkeypatch) -> None:
     assert payload is not None
     assert payload["cache_prompt"] is False
     assert metrics["cache_prompt"] is False
+
+
+def test_pipeline_benchmark_defaults_are_uncapped_and_16k_only() -> None:
+    baseline = pipeline_configs()[0]
+    assert BENCHMARK_CONTEXT_SIZE == 16384
+    assert BENCHMARK_MAX_IMAGE_DIM == 8192
+    assert baseline.name == "baseline"
+    assert baseline.max_image_dim == 8192
+    # Importing benchmark code must not change the production server default.
+    assert llama_backend.CONTEXT_SIZE == 4096
 
 
 def test_full_preprocessing_mode_is_equivalent_to_production_enhance() -> None:

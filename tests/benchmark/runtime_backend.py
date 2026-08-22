@@ -26,6 +26,7 @@ from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS, find_llama_server, ven
 CACHE_TYPES = ("f16", "bf16", "q8_0", "q5_0", "q4_0")
 FLASH_ATTN_VALUES = ("auto", "on", "off")
 SPEC_TYPES = ("none", "draft-mtp")
+BENCHMARK_BASELINE_CONTEXT_SIZE = 8192
 
 
 @dataclass(frozen=True)
@@ -92,9 +93,19 @@ class ServerRuntimeConfig:
 
 
 def production_runtime_config() -> ServerRuntimeConfig:
-    """Resolve the app's current explicit + llama.cpp implicit defaults."""
+    """Return the production-like benchmark baseline with a safe context budget.
+
+    The application runtime remains untouched.  The real-world benchmark uses
+    an 8192-token context baseline so DPI/image sweeps cannot be rejected merely
+    because a long OCR transcription is truncated at the historical 4096-token
+    benchmark context.  Stage A still explicitly tests smaller context sizes.
+    """
     optimal = LlamaServerBackend._optimal_thread_count()
-    return ServerRuntimeConfig(threads=optimal, threads_batch=optimal).resolved()
+    return ServerRuntimeConfig(
+        context_size=BENCHMARK_BASELINE_CONTEXT_SIZE,
+        threads=optimal,
+        threads_batch=optimal,
+    ).resolved()
 
 
 @dataclass(frozen=True)

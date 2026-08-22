@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import core.llama_backend as llama_backend  # noqa: E402
 from core.llama_backend import LlamaServerBackend  # noqa: E402
 from core.llama_ocr_api import (  # noqa: E402
     JPEG_QUALITY,
@@ -40,12 +41,19 @@ from tests.benchmark.benchmark_prompt_quality import (  # noqa: E402
 )
 
 
+# Benchmark-only limits. Production remains at its current 4096-token context
+# and 1920px image cap. 8192px is effectively uncapped for the supported PDF
+# range up to 600 DPI (an A4 page is ~7016px on its long side at 600 DPI).
+BENCHMARK_CONTEXT_SIZE = 16384
+BENCHMARK_MAX_IMAGE_DIM = 8192
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     name: str
     preprocessing_enabled: bool = True
     pdf_dpi: int = PDF_DPI
-    max_image_dim: int = MAX_IMAGE_DIM
+    max_image_dim: int = BENCHMARK_MAX_IMAGE_DIM
     jpeg_quality: int = JPEG_QUALITY
 
 
@@ -283,6 +291,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _new_benchmark_backend() -> LlamaServerBackend:
+    """Create the owned benchmark server with a benchmark-only 16K context."""
+    llama_backend.CONTEXT_SIZE = BENCHMARK_CONTEXT_SIZE
+    return LlamaServerBackend()
+
+
 def main() -> int:
     args = parse_args()
     if args.server_url and args.restart_server_per_config:
@@ -306,8 +320,8 @@ def main() -> int:
     external_url = str(args.server_url).strip()
 
     if not external_url and not args.restart_server_per_config:
-        shared_backend = LlamaServerBackend()
-        print("[pipeline] Avvio llama-server SYCL condiviso...")
+        shared_backend = _new_benchmark_backend()
+        print("[pipeline] Avvio llama-server SYCL condiviso (ctx=16384)...")
         shared_backend.initialize()
         external_url = shared_backend.server_url
 
@@ -316,10 +330,10 @@ def main() -> int:
             owned_backend: LlamaServerBackend | None = None
             server_url = external_url
             if args.restart_server_per_config:
-                owned_backend = LlamaServerBackend()
+                owned_backend = _new_benchmark_backend()
                 print(
                     f"[pipeline] [{config_index}/{len(configs)}] "
-                    f"fresh llama-server per {config.name}..."
+                    f"fresh llama-server ctx={BENCHMARK_CONTEXT_SIZE} per {config.name}..."
                 )
                 owned_backend.initialize()
                 server_url = owned_backend.server_url
@@ -361,11 +375,17 @@ def main() -> int:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "corpus_source": corpus_source,
         "production_defaults": {
+            "context_size": 4096,
             "preprocessing_enabled": True,
             "pdf_dpi": PDF_DPI,
             "max_image_dim": MAX_IMAGE_DIM,
             "jpeg_quality": JPEG_QUALITY,
             "prompt": OCR_PROMPT,
+        },
+        "benchmark_defaults": {
+            "context_size": BENCHMARK_CONTEXT_SIZE,
+            "max_image_dim": BENCHMARK_MAX_IMAGE_DIM,
+            "resolution_policy": "effectively uncapped for supported PDF DPI range",
         },
         "restart_server_per_config": bool(args.restart_server_per_config),
         "timing_interpretation": (

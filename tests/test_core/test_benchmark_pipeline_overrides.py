@@ -9,6 +9,7 @@ from PIL import Image
 
 from core import llama_backend, llama_ocr_api
 from core.image_preprocessor import ImagePreprocessor
+from tests.benchmark import run_realworld_suite as canonical_realworld
 from tests.benchmark.run_pipeline_benchmark import (
     BENCHMARK_CONTEXT_SIZE,
     BENCHMARK_MAX_IMAGE_DIM,
@@ -78,6 +79,16 @@ def test_pipeline_benchmark_defaults_are_uncapped_and_16k_only() -> None:
     assert baseline.max_image_dim == 8192
     # Importing benchmark code must not change the production server default.
     assert llama_backend.CONTEXT_SIZE == 4096
+
+
+def test_realworld_benchmark_baseline_is_uncapped_and_16k_only() -> None:
+    baseline = canonical_realworld._suite.production_baseline("OCR", name="test")
+    assert canonical_realworld.BENCHMARK_BASELINE_MAX_IMAGE_DIM == 8192
+    assert baseline.max_image_dim == 8192
+    assert baseline.runtime.context_size == 16384
+    # Canonical benchmark overrides remain isolated from production defaults.
+    assert llama_backend.CONTEXT_SIZE == 4096
+    assert llama_ocr_api.MAX_IMAGE_DIM == 1920
 
 
 def test_full_preprocessing_mode_is_equivalent_to_production_enhance() -> None:

@@ -26,7 +26,7 @@ from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS, find_llama_server, ven
 CACHE_TYPES = ("f16", "bf16", "q8_0", "q5_0", "q4_0")
 FLASH_ATTN_VALUES = ("auto", "on", "off")
 SPEC_TYPES = ("none", "draft-mtp")
-BENCHMARK_BASELINE_CONTEXT_SIZE = 8192
+BENCHMARK_BASELINE_CONTEXT_SIZE = 16384
 
 
 @dataclass(frozen=True)
@@ -96,9 +96,9 @@ def production_runtime_config() -> ServerRuntimeConfig:
     """Return the production-like benchmark baseline with a safe context budget.
 
     The application runtime remains untouched.  The real-world benchmark uses
-    an 8192-token context baseline so DPI/image sweeps cannot be rejected merely
-    because a long OCR transcription is truncated at the historical 4096-token
-    benchmark context.  Stage A still explicitly tests smaller context sizes.
+    a 16384-token context baseline so DPI/image sweeps cannot be rejected merely
+    because a long OCR transcription is truncated by the benchmark context.
+    Stage A still explicitly tests smaller context sizes.
     """
     optimal = LlamaServerBackend._optimal_thread_count()
     return ServerRuntimeConfig(
@@ -176,7 +176,7 @@ def thread_candidates() -> tuple[int, ...]:
 
 def runtime_stage_a_values(capabilities: RuntimeCapabilities) -> dict[str, list[Any]]:
     candidates: dict[str, list[Any]] = {
-        "context_size": [2048, 3072, 4096, 6144, 8192],
+        "context_size": [2048, 3072, 4096, 6144, 8192, 12288, 16384],
         "batch_size": [256, 512, 1024, 1536, 2048, 4096],
         "ubatch_size": [128, 256, 512, 768, 1024],
         "threads": list(thread_candidates()),

@@ -15,6 +15,7 @@ from core.app_controller import (
     OP_OCR,
     AppController,
 )
+from core.event_bus import EventBus
 from core.exceptions import OperationBusyError, OperationCancelledError
 from core.models import HardwareInfo, OCRResult
 from core.process_manager import ProcessManager
@@ -303,6 +304,32 @@ def test_model_can_be_unloaded_and_loaded_again_without_closing_controller(monke
     assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is True
     assert engine.initialize_calls == ["llama-cpp-sycl"]
+    controller.shutdown()
+
+
+def test_model_lifecycle_releases_worker_before_publishing_idle(monkeypatch) -> None:
+    controller, engine = _controller_with_fake_engine(monkeypatch)
+    idle_worker_snapshots: list[threading.Thread | None] = []
+
+    def observe_operation(payload: dict[str, object]) -> None:
+        if payload.get("operation") == OP_IDLE:
+            idle_worker_snapshots.append(
+                controller._model_thread  # type: ignore[attr-defined]
+            )
+
+    EventBus.subscribe("operation_changed", observe_operation)
+
+    assert controller.request_model_unload() is True
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
+    assert engine.is_initialized is False
+
+    controller.request_model_load("llama-cpp-sycl")
+    assert engine.initialize_started.wait(timeout=1)
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
+    assert engine.is_initialized is True
+
+    assert len(idle_worker_snapshots) >= 2
+    assert all(worker is None for worker in idle_worker_snapshots)
     controller.shutdown()
 
 

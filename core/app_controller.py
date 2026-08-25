@@ -302,10 +302,11 @@ class AppController:
                     default_device,
                 )
 
-        self._initialized = True
         if self._settings.load_model_at_startup:
             self.request_model_load(default_device)
+            self._initialized = True
         else:
+            self._initialized = True
             EventBus.emit(
                 "model_unloaded",
                 {"device": default_device, "reason": "startup_disabled"},

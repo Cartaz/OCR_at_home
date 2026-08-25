@@ -256,6 +256,40 @@ def test_initialize_can_leave_model_unloaded(monkeypatch) -> None:
     controller.shutdown()
 
 
+def test_initialize_remains_retryable_if_model_worker_cannot_start(monkeypatch) -> None:
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+    controller = AppController(
+        Settings(default_device="llama-cpp-sycl", load_model_at_startup=True)
+    )
+    engine = FakeEngine(initialized=False)
+    controller._engine = engine  # type: ignore[attr-defined]
+    controller._hardware_detector = FakeDetector()  # type: ignore[attr-defined]
+    attempts = 0
+
+    def start_model_load(device: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated thread start failure")
+        controller.load_model_sync(device)
+
+    monkeypatch.setattr(controller, "_start_model_load_worker", start_model_load)
+
+    with pytest.raises(RuntimeError, match="thread start failure"):
+        controller.initialize()
+
+    assert controller._initialized is False  # type: ignore[attr-defined]
+    assert controller.operation == OP_IDLE
+
+    controller.initialize()
+
+    assert controller._initialized is True  # type: ignore[attr-defined]
+    assert controller.operation == OP_IDLE
+    assert engine.is_initialized is True
+    assert attempts == 2
+    controller.shutdown()
+
+
 def test_model_can_be_unloaded_and_loaded_again_without_closing_controller(monkeypatch) -> None:
     controller, engine = _controller_with_fake_engine(monkeypatch)
 

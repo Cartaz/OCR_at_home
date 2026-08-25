@@ -195,7 +195,11 @@ Acceptance criteria:
 
 Goal: improve speed of use without adding decorative complexity.
 
-- [ ] Drag and drop images/PDFs.
+- [x] Drag and drop images/PDFs.
+  - Qt accepts only local-file URLs; `WebBridge` applies the same canonical path validation used by the file pickers before publishing one atomic UI event.
+  - Drops are rejected outside `idle`; duplicate paths are removed without changing order.
+  - One dropped file selects OCR, multiple files route to Batch, while a drop made from the Batch view remains a batch selection.
+  - Native URL filtering, bridge validation/busy rejection and real Qt WebEngine routing are covered in CI.
 - [ ] Paste image from clipboard.
 - [x] Keyboard shortcuts (`Ctrl+O`, OCR start shortcut, copy result).
   - `Ctrl+O` opens the single-file picker, `Ctrl+Enter` starts OCR or batch according to the active view, and `Ctrl+Shift+C` copies the OCR result.

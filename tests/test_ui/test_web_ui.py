@@ -57,10 +57,13 @@ def test_javascript_calls_real_backend_actions() -> None:
 
 def test_single_save_does_not_roundtrip_ocr_text_to_python() -> None:
     js = (WEB / "save_ui.js").read_text(encoding="utf-8")
-    save_call = js.split('"saveSingleResult"', 1)[1].split(");", 1)[0]
-    assert "completedSourcePath" in save_call
-    assert "format" in save_call
-    assert "state.singleText" not in save_call
+    helper = js.split("async function requestManualSave", 1)[1].split(
+        "async function save", 1
+    )[0]
+    assert "callNative(method, completedSourcePath, format)" in helper
+    assert "state.singleText" not in helper
+    assert 'requestManualSave("saveSingleResult", format' in js
+    assert 'requestManualSave("saveSinglePdfPages", format' in js
     assert "resultSourcePath" not in js
 
 

@@ -73,7 +73,9 @@
             updateButtons();
             showNotice(
                 failureTitle,
-                result.error || "Impossibile avviare il salvataggio."
+                result.error || "Impossibile avviare il salvataggio.",
+                "",
+                true
             );
             return;
         }
@@ -153,7 +155,8 @@
                     showNotice(
                         payload.kind === "pages" ? "Pagine non salvate" : "Risultato non salvato",
                         "Impossibile scrivere il file di output.",
-                        String(payload.error || "")
+                        String(payload.error || ""),
+                        true
                     );
                 }
             } else if (type === "batch_output_save_failed") {
@@ -162,7 +165,8 @@
                     payload.image_path
                         ? `Impossibile salvare ${basename(payload.image_path)}.`
                         : "Impossibile salvare un risultato del batch.",
-                    String(payload.error || "")
+                    String(payload.error || ""),
+                    true
                 );
             } else if (type === "batch_output_summary") {
                 const saved = Number(payload.saved || 0);
@@ -177,7 +181,8 @@
                     showNotice(
                         "Salvataggio batch incompleto",
                         `${saved} salvati, ${failed} non salvati.`,
-                        String(payload.output_dir || "")
+                        String(payload.output_dir || ""),
+                        true
                     );
                 }
             }

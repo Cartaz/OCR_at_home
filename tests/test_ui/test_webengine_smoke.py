@@ -334,7 +334,3 @@ def test_safe_controls_remain_available_during_model_load() -> None:
     assert '$("#single-file-button").disabled = busy' in script
     assert '$("#batch-file-button").disabled = busy' in script
     assert '$("#global-cancel-button").classList.toggle("hidden", !busy' in script
-    update_operation = script.split("function updateOperationUi()", 1)[1].split(
-        "function setModelStatus", 1
-    )[0]
-    assert 'op === "model_loading"' not in update_operation

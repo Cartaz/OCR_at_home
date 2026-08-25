@@ -18,6 +18,17 @@ def test_installer_pins_llama_cpp_and_uses_sycl() -> None:
     assert "-DGGML_SYCL=ON" in text
 
 
+def test_installer_requires_python_312_and_verifies_critical_imports() -> None:
+    text = _installer_text()
+    assert "sys.version_info >= (3, 12)" in text
+    assert "python3.11" not in text
+    assert "Serve Python 3.12 o successivo." in text
+    assert "verify_python_runtime" in text
+    assert "QWebEngineView" in text
+    assert "QWebChannel" in text
+    assert "import pymupdf" in text
+
+
 def test_installer_sources_oneapi_without_nounset() -> None:
     text = _installer_text()
     build_block = text.split('if ! bash -c "', 1)[1].split('"; then', 1)[0]

@@ -12,7 +12,7 @@ def test_closing_main_window_is_a_real_application_exit() -> None:
 
     assert "app.setQuitOnLastWindowClosed(True)" in main
     assert "hide_on_close" not in main
-    assert "event.ignore()" not in window
+    assert "def closeEvent(" not in window
     assert "self.hide()" not in window
 
 

@@ -55,6 +55,14 @@ def test_javascript_calls_real_backend_actions() -> None:
     assert "mock" not in js.lower()
 
 
+def test_single_save_does_not_roundtrip_ocr_text_to_python() -> None:
+    js = (WEB / "save_ui.js").read_text(encoding="utf-8")
+    save_call = js.split('"saveSingleResult"', 1)[1].split(");", 1)[0]
+    assert "resultSourcePath" in save_call
+    assert "format" in save_call
+    assert "state.singleText" not in save_call
+
+
 def test_main_uses_webengine_not_qml() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "QWebChannel" in source

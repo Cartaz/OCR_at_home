@@ -293,6 +293,54 @@ function notifyUiState(type, payload = {}) {
     runExtensionHook("onUiState", type, payload);
 }
 
+function clickIfEnabled(selector) {
+    const button = $(selector);
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+}
+
+function handleKeyboardShortcut(event) {
+    if (!event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+    const key = String(event.key || "").toLowerCase();
+
+    if (key === "o" && !event.shiftKey) {
+        event.preventDefault();
+        if (event.repeat) return;
+        setView("ocr");
+        clickIfEnabled("#single-file-button");
+        return;
+    }
+
+    if (key === "enter" && !event.shiftKey) {
+        if (!(["ocr", "batch"].includes(state.activeView))) return;
+        event.preventDefault();
+        if (event.repeat) return;
+        clickIfEnabled(state.activeView === "batch" ? "#batch-start-button" : "#single-start-button");
+        return;
+    }
+
+    if (key === "c" && event.shiftKey && state.activeView === "ocr") {
+        event.preventDefault();
+        if (event.repeat) return;
+        clickIfEnabled("#copy-single-button");
+    }
+}
+
+function configureKeyboardShortcuts() {
+    const shortcuts = [
+        ["#single-file-button", "Control+O", "Scegli file (Ctrl+O)"],
+        ["#single-start-button", "Control+Enter", "Avvia OCR (Ctrl+Enter)"],
+        ["#batch-start-button", "Control+Enter", "Avvia batch (Ctrl+Enter)"],
+        ["#copy-single-button", "Control+Shift+C", "Copia testo (Ctrl+Shift+C)"],
+    ];
+    for (const [selector, ariaShortcut, title] of shortcuts) {
+        const control = $(selector);
+        control.setAttribute("aria-keyshortcuts", ariaShortcut);
+        control.title = title;
+    }
+}
+
 function handleEvent(raw) {
     let message;
     try {
@@ -455,6 +503,8 @@ async function refreshLogs() {
 function bindHandlers() {
     $$(".nav-item").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
     $("#notice-close").addEventListener("click", hideNotice);
+    configureKeyboardShortcuts();
+    document.addEventListener("keydown", handleKeyboardShortcut);
 
     $("#single-file-button").addEventListener("click", async () => {
         const result = await callNative("chooseSingleFile");

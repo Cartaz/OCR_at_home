@@ -185,6 +185,82 @@ def test_batch_items_can_be_removed_only_before_start() -> None:
     _ = app
 
 
+def test_keyboard_shortcuts_delegate_to_existing_controls() -> None:
+    app, window = _load_window()
+    script = """
+        (() => {
+            const calls = [];
+            state.backend = {
+                chooseSingleFile: (callback) => {
+                    calls.push('open');
+                    callback(JSON.stringify({ok: true, cancelled: true}));
+                },
+                startSingleOcr: (path, callback) => {
+                    calls.push(`ocr:${path}`);
+                    callback(JSON.stringify({ok: true}));
+                },
+                startBatch: (paths, callback) => {
+                    calls.push(`batch:${paths}`);
+                    callback(JSON.stringify({ok: true}));
+                },
+                copyText: (text) => calls.push(`copy:${text}`)
+            };
+            state.devices = [{available: true, device_name: 'SYCL'}];
+            state.modelReady = true;
+            state.operation = 'idle';
+            state.singlePath = '/tmp/scan.png';
+            state.batchPaths = ['/tmp/one.png', '/tmp/two.pdf'];
+            renderSingleText('recognized');
+            renderBatchFiles();
+            updateOperationUi();
+
+            const dispatch = (key, options = {}) => {
+                const event = new KeyboardEvent('keydown', {
+                    key,
+                    ctrlKey: true,
+                    bubbles: true,
+                    cancelable: true,
+                    ...options
+                });
+                const accepted = document.dispatchEvent(event);
+                return !accepted;
+            };
+
+            setView('ocr');
+            const openPrevented = dispatch('o');
+            const ocrPrevented = dispatch('Enter');
+            const normalCopyPrevented = dispatch('c');
+            const copyPrevented = dispatch('c', {shiftKey: true});
+            setView('batch');
+            const batchPrevented = dispatch('Enter');
+
+            return JSON.stringify([
+                calls,
+                openPrevented,
+                ocrPrevented,
+                normalCopyPrevented,
+                copyPrevented,
+                batchPrevented,
+                document.querySelector('#single-file-button').getAttribute('aria-keyshortcuts'),
+                document.querySelector('#single-start-button').getAttribute('aria-keyshortcuts'),
+                document.querySelector('#copy-single-button').getAttribute('aria-keyshortcuts')
+            ]);
+        })();
+    """
+
+    result = _run_json_script(window, script)
+    assert result[0] == [
+        "open",
+        "ocr:/tmp/scan.png",
+        "copy:recognized",
+        'batch:["/tmp/one.png","/tmp/two.pdf"]',
+    ]
+    assert result[1:6] == [True, True, False, True, True]
+    assert result[6:] == ["Control+O", "Control+Enter", "Control+Shift+C"]
+    _close_window(window)
+    _ = app
+
+
 def test_safe_controls_remain_available_during_model_load() -> None:
     script = (ROOT / "ui" / "web" / "app.js").read_text(encoding="utf-8")
     assert '$("#single-file-button").disabled = busy' in script

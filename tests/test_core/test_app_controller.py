@@ -12,7 +12,6 @@ from config.settings import Settings
 from core.app_controller import (
     OP_IDLE,
     OP_MODEL_LOADING,
-    OP_MODEL_UNLOADING,
     OP_OCR,
     AppController,
 )
@@ -31,12 +30,16 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 
 class FakeEngine:
-    def __init__(self) -> None:
-        self.is_initialized = True
-        self.device = "llama-cpp"
-        self.backend = "llama-cpp"
+    def __init__(self, *, initialized: bool = True) -> None:
+        self.is_initialized = initialized
+        self.device = "llama-cpp" if initialized else ""
+        self.backend = "llama-cpp" if initialized else ""
         self.started = threading.Event()
         self.release = threading.Event()
+        self.release.set()
+        self.initialize_started = threading.Event()
+        self.initialize_release = threading.Event()
+        self.initialize_release.set()
         self.shutdown_calls = 0
         self.initialize_calls: list[str] = []
 
@@ -47,14 +50,21 @@ class FakeEngine:
 
     def initialize(self, device: str, *, cancel_token=None) -> None:
         self.initialize_calls.append(device)
+        self.initialize_started.set()
+        while not self.initialize_release.wait(timeout=0.01):
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
         self.device = device
+        self.backend = device
         self.is_initialized = True
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
         self.is_initialized = False
+        self.device = ""
+        self.backend = ""
 
 
 class FakeDetector:
@@ -96,10 +106,15 @@ class FakeUnavailableDetector:
         return self.devices[0]
 
 
-def _controller_with_fake_engine(monkeypatch) -> tuple[AppController, FakeEngine]:
+def _controller_with_fake_engine(
+    monkeypatch,
+    *,
+    initialized: bool = True,
+    settings: Settings | None = None,
+) -> tuple[AppController, FakeEngine]:
     monkeypatch.setattr(Settings, "save", lambda self: None)
-    controller = AppController(Settings(default_device="llama-cpp"))
-    fake = FakeEngine()
+    controller = AppController(settings or Settings(default_device="llama-cpp"))
+    fake = FakeEngine(initialized=initialized)
     controller._engine = fake  # type: ignore[attr-defined]
     controller._hardware_detector = FakeDetector()  # type: ignore[attr-defined]
     controller._process_manager.shutdown()  # type: ignore[attr-defined]
@@ -112,6 +127,7 @@ def _controller_with_fake_engine(monkeypatch) -> tuple[AppController, FakeEngine
 
 def test_ocr_and_batch_are_mutually_exclusive(monkeypatch) -> None:
     controller, engine = _controller_with_fake_engine(monkeypatch)
+    engine.release.clear()
     controller.start_ocr(Path("page.png"))
     assert engine.started.wait(timeout=1)
     assert controller.operation == OP_OCR
@@ -125,29 +141,32 @@ def test_ocr_and_batch_are_mutually_exclusive(monkeypatch) -> None:
     controller.shutdown()
 
 
-def test_switch_device_does_not_shutdown_engine_on_caller_thread(monkeypatch) -> None:
+def test_switch_device_runs_model_load_on_controller_worker(monkeypatch) -> None:
     controller, engine = _controller_with_fake_engine(monkeypatch)
 
     controller.switch_device("llama-cpp-sycl")
-    assert controller.operation == OP_MODEL_LOADING
-    assert engine.shutdown_calls == 0
 
-    controller.load_model_sync("llama-cpp-sycl")
-    assert controller.operation == OP_IDLE
+    assert engine.initialize_started.wait(timeout=1)
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.initialize_calls == ["llama-cpp-sycl"]
+    assert engine.shutdown_calls == 0
+    assert controller.model_device == "llama-cpp-sycl"
     controller.shutdown()
 
 
-def test_cancelled_model_load_releases_operation(monkeypatch) -> None:
-    controller, engine = _controller_with_fake_engine(monkeypatch)
+def test_cancelled_async_model_load_releases_operation(monkeypatch) -> None:
+    controller, engine = _controller_with_fake_engine(monkeypatch, initialized=False)
+    engine.initialize_release.clear()
+
     controller.request_model_load("llama-cpp-sycl")
+    assert controller.operation == OP_MODEL_LOADING
+    assert engine.initialize_started.wait(timeout=1)
+
     controller.cancel_model_loading()
 
-    with pytest.raises(OperationCancelledError):
-        controller.load_model_sync("llama-cpp-sycl")
-
-    assert controller.operation == OP_IDLE
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.initialize_calls == ["llama-cpp-sycl"]
+    assert engine.is_initialized is False
     controller.shutdown()
 
 
@@ -158,13 +177,15 @@ def test_initialize_preserves_configured_device_if_nothing_is_available(monkeypa
         "save",
         lambda self: saved.append(self.default_device),
     )
-    controller = AppController(Settings(default_device="llama-cpp-sycl"))
+    controller = AppController(
+        Settings(default_device="llama-cpp-sycl", load_model_at_startup=False)
+    )
     controller._hardware_detector = FakeUnavailableDetector()  # type: ignore[attr-defined]
 
     controller.initialize()
 
     assert controller.settings.default_device == "llama-cpp-sycl"
-    assert controller.operation == OP_MODEL_LOADING
+    assert controller.operation == OP_IDLE
     assert saved == []
     controller.shutdown()
 
@@ -179,25 +200,71 @@ def test_initialize_can_leave_model_unloaded(monkeypatch) -> None:
     controller.initialize()
 
     assert controller.operation == OP_IDLE
-    assert controller.engine.is_initialized is False
+    assert controller.model_ready is False
     controller.shutdown()
 
 
 def test_model_can_be_unloaded_and_loaded_again_without_closing_controller(monkeypatch) -> None:
     controller, engine = _controller_with_fake_engine(monkeypatch)
 
-    controller.request_model_unload()
-    assert controller.operation == OP_MODEL_UNLOADING
-    assert engine.shutdown_calls == 0
-
-    controller.unload_model_sync()
-    assert controller.operation == OP_IDLE
+    assert controller.request_model_unload() is True
+    assert _wait_until(lambda: engine.shutdown_calls == 1)
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is False
-    assert engine.shutdown_calls == 1
 
     controller.request_model_load("llama-cpp-sycl")
-    controller.load_model_sync("llama-cpp-sycl")
-    assert controller.operation == OP_IDLE
+    assert engine.initialize_started.wait(timeout=1)
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is True
     assert engine.initialize_calls == ["llama-cpp-sycl"]
     controller.shutdown()
+
+
+def test_single_ocr_is_resumed_after_controller_owned_model_load(monkeypatch) -> None:
+    controller, engine = _controller_with_fake_engine(monkeypatch, initialized=False)
+    engine.release.clear()
+
+    queued = controller.start_ocr_or_queue(Path("page.png"))
+
+    assert queued is True
+    assert engine.initialize_started.wait(timeout=1)
+    assert engine.started.wait(timeout=1)
+    assert controller.operation == OP_OCR
+
+    engine.release.set()
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
+    controller.shutdown()
+
+
+def test_idle_auto_unload_policy_lives_in_controller(monkeypatch) -> None:
+    settings = Settings(
+        default_device="llama-cpp",
+        model_auto_unload_minutes=5,
+    )
+    controller, engine = _controller_with_fake_engine(
+        monkeypatch,
+        settings=settings,
+    )
+    controller._idle_since = 100.0  # type: ignore[attr-defined]
+
+    assert controller.check_idle_model_unload(now=399.0) is False
+    assert engine.shutdown_calls == 0
+
+    assert controller.check_idle_model_unload(now=401.0) is True
+    assert _wait_until(lambda: engine.shutdown_calls == 1)
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
+    controller.shutdown()
+
+
+def test_shutdown_cancels_and_joins_model_load_worker(monkeypatch) -> None:
+    controller, engine = _controller_with_fake_engine(monkeypatch, initialized=False)
+    engine.initialize_release.clear()
+
+    controller.request_model_load("llama-cpp-sycl")
+    assert engine.initialize_started.wait(timeout=1)
+
+    controller.shutdown()
+
+    assert controller.operation != OP_MODEL_LOADING
+    model_thread = controller._model_thread  # type: ignore[attr-defined]
+    assert model_thread is None or not model_thread.is_alive()

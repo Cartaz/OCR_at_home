@@ -50,10 +50,12 @@ def test_language_selector_is_native_html_and_confidence_control_is_removed() ->
     assert not (WEB / "settings_ui.js").exists()
 
 
-def test_single_result_and_pdf_page_save_controls_use_real_backend_actions() -> None:
+def test_single_result_and_pdf_page_save_controls_delegate_to_core_output_workflow() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
     bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
+    controller = (ROOT / "core" / "app_controller.py").read_text(encoding="utf-8")
+    output = (ROOT / "core" / "output_workflow.py").read_text(encoding="utf-8")
 
     assert 'src="save_ui.js"' in html
     assert 'id="save-single-txt-button"' in html
@@ -65,15 +67,23 @@ def test_single_result_and_pdf_page_save_controls_use_real_backend_actions() -> 
     assert "completedSourcePath" in save_js
     assert "def saveSingleResult" in bridge
     assert "def saveSinglePdfPages" in bridge
-    assert "write_ocr_text" in bridge
-    assert "write_ocr_pages" in bridge
+    assert "self._controller.save_single_result" in bridge
+    assert "self._controller.save_single_pdf_pages" in bridge
+    assert "write_ocr_text" not in bridge
+    assert "write_ocr_pages" not in bridge
+    assert "def save_single_result" in controller
+    assert "def save_single_pdf_pages" in controller
+    assert "write_ocr_text" in output
+    assert "write_ocr_pages" in output
 
 
-def test_batch_autosave_controls_are_native_and_persistent() -> None:
+def test_batch_autosave_controls_are_native_and_core_owned() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
     settings = (ROOT / "config" / "settings.py").read_text(encoding="utf-8")
     bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
+    output = (ROOT / "core" / "output_workflow.py").read_text(encoding="utf-8")
+    event_bridge = (ROOT / "ui" / "event_bridge.py").read_text(encoding="utf-8")
 
     assert 'id="batch-auto-save-toggle"' in html
     assert 'id="batch-output-format"' in html
@@ -84,5 +94,8 @@ def test_batch_autosave_controls_are_native_and_persistent() -> None:
     assert "payload.batch_auto_save" in save_js
     assert "payload.batch_output_format" in save_js
     assert "payload.batch_save_pdf_pages" in save_js
-    assert "_snapshot_batch_output" in bridge
-    assert "batch_output_summary" in bridge
+    assert "_snapshot_batch_output" not in bridge
+    assert "_batch_output_snapshot" not in bridge
+    assert "BatchOutputOptions" in output
+    assert "batch_output_summary" in output
+    assert '"batch_output_summary"' in event_bridge

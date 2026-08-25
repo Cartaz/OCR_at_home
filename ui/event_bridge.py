@@ -1,6 +1,6 @@
 """Qt signal adapter for the core EventBus.
 
-This module contains no visual code.  It converts synchronous, potentially
+This module contains no visual code. It converts synchronous, potentially
 cross-thread EventBus callbacks into Qt signals that can safely be consumed by
 the desktop presentation layer.
 """
@@ -42,6 +42,9 @@ class EventBridge(QObject):
         "batch_completed",
         "batch_cancelled",
         "batch_failed",
+        "batch_output_saved",
+        "batch_output_save_failed",
+        "batch_output_summary",
     )
 
     def __init__(self, controller: Any, parent: QObject | None = None) -> None:

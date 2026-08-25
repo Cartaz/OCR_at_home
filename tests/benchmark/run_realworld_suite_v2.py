@@ -1,8 +1,8 @@
 """Canonical real-world GLM-OCR benchmark, protocol v2.
 
 The benchmark tunes prompt, image/PDF pipeline and relevant llama-server runtime
-variables.  It uses one continuous handwritten page split only at scoring time
-into MAIUSCOLO/SCRIPT/CORSIVO.  Production defaults are never changed here.
+variables. It uses one continuous handwritten page split only at scoring time
+into MAIUSCOLO/SCRIPT/CORSIVO. Production defaults are never changed here.
 """
 
 from __future__ import annotations
@@ -25,6 +25,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.llama_ocr_api import ocr_pdf, ocr_single_image  # noqa: E402
+from tests.benchmark.canonical_policy import (  # noqa: E402
+    CHECKPOINT_SCHEMA,
+    fastest_quality_equivalent,
+    load_ground_truth,
+    production_baseline,
+    prompt_configs,
+    quality_reference,
+    select_fastest_quality_gated_values,
+    stage_a_groups,
+)
 from tests.benchmark.realworld_suite_v2 import (  # noqa: E402
     BENCHMARK_SEED,
     DEFAULT_BEAM_WIDTH,
@@ -43,19 +53,12 @@ from tests.benchmark.realworld_suite_v2 import (  # noqa: E402
     classify_quality,
     config_variable_value,
     documents_from_ground_truth,
-    fastest_quality_equivalent,
-    load_ground_truth,
     observation_from_dict,
     observation_to_dict,
     pareto_frontier,
-    production_baseline,
-    prompt_configs,
-    quality_reference,
     rotation_order,
     score_document,
-    select_fastest_quality_gated_values,
     sha256_file,
-    stage_a_groups,
 )
 from tests.benchmark.runtime_backend import (  # noqa: E402
     BenchmarkLlamaServerBackend,
@@ -65,7 +68,6 @@ from tests.benchmark.runtime_backend import (  # noqa: E402
     process_rss_mib,
 )
 
-CHECKPOINT_SCHEMA = 2
 BORDERLINE_RUNS = 10
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".gif"}
 
@@ -425,8 +427,8 @@ def _prompt_stage(documents: Sequence[BenchmarkDocument], output_dir: Path, stat
 
 
 def _variable_baseline(configs: Sequence[PipelineConfig], variable: str, prompt: str) -> PipelineConfig:
-    baseline = production_baseline(prompt, name=f"a_{variable}_baseline")
-    return baseline
+    _ = configs
+    return production_baseline(prompt, name=f"a_{variable}_baseline")
 
 
 def _stage_a(prompt: str, capabilities: RuntimeCapabilities, documents: Sequence[BenchmarkDocument], output_dir: Path, state: dict[str, Any], args: argparse.Namespace) -> dict[str, list[Any]]:

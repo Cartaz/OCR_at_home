@@ -29,19 +29,13 @@ class _DummyController:
     def update_settings(self, **overrides: object) -> None:
         self.settings = self.settings.with_(**overrides)
 
-    def save_single_result(self, source_path: str, file_format: str) -> Path:
+    def request_save_single_result(self, source_path: str, file_format: str) -> str:
         self.saved_single = (source_path, file_format)
-        destination = Path(self.settings.output_dir) / f"saved.{file_format}"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text("canonico\n", encoding="utf-8")
-        return destination
+        return "request-single"
 
-    def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
+    def request_save_single_pdf_pages(self, source_path: str, file_format: str) -> str:
         self.saved_pages = (source_path, file_format)
-        destination = Path(self.settings.output_dir) / f"page-001.{file_format}"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text("pagina\n", encoding="utf-8")
-        return [destination]
+        return "request-pages"
 
     def cancel_model_loading(self) -> None:
         pass
@@ -90,25 +84,25 @@ def test_output_settings_are_validated_and_persisted_in_controller(tmp_path: Pat
         bridge._events.shutdown()
 
 
-def test_single_save_delegates_only_source_and_format_to_controller(tmp_path: Path) -> None:
+def test_single_save_returns_request_id_without_waiting_for_file(tmp_path: Path) -> None:
     bridge, controller = _bridge(tmp_path)
     source = str(tmp_path / "scan.png")
     try:
         result = json.loads(bridge.saveSingleResult(source, "txt"))
-        assert result["ok"] is True
+        assert result == {"ok": True, "request_id": "request-single"}
         assert controller.saved_single == (source, "txt")
-        assert Path(result["path"]).read_text(encoding="utf-8") == "canonico\n"
+        assert list(tmp_path.iterdir()) == []
     finally:
         bridge._events.shutdown()
 
 
-def test_pdf_page_save_delegates_to_controller(tmp_path: Path) -> None:
+def test_pdf_page_save_returns_request_id_without_waiting_for_files(tmp_path: Path) -> None:
     bridge, controller = _bridge(tmp_path)
     source = str(tmp_path / "document.pdf")
     try:
         result = json.loads(bridge.saveSinglePdfPages(source, "md"))
-        assert result["ok"] is True
-        assert result["count"] == 1
+        assert result == {"ok": True, "request_id": "request-pages"}
         assert controller.saved_pages == (source, "md")
+        assert list(tmp_path.iterdir()) == []
     finally:
         bridge._events.shutdown()

@@ -21,20 +21,13 @@ from core.app_controller import (
     OP_OCR,
     AppController,
 )
-from core.exceptions import OperationCancelledError
 from ui.event_bridge import EventBridge
 
 logger = logging.getLogger(__name__)
 
 
 class WebBridge(QObject):
-    """Thin presentation bridge; all OCR/business logic remains in Python core.
-
-    Bootstrap and controller initialization are intentionally separated: the
-    bootstrap path returns only already-known state, while hardware detection
-    and model startup run on a worker so Qt WebEngine can present its first
-    frame immediately.
-    """
+    """Thin presentation bridge; operational state remains in Python core."""
 
     event = Signal(str)
 
@@ -49,8 +42,6 @@ class WebBridge(QObject):
         self._window = window
         self._events = EventBridge(controller, parent=self)
         self._events.event_received.connect(self._on_core_event)
-        self._model_thread: threading.Thread | None = None
-        self._model_thread_lock = threading.Lock()
         self._init_thread: threading.Thread | None = None
         self._init_thread_lock = threading.Lock()
         self._devices_snapshot: list[dict[str, Any]] = []
@@ -64,9 +55,6 @@ class WebBridge(QObject):
         return json.dumps(data, ensure_ascii=False, default=str)
 
     def _publish(self, event_name: str, payload: dict[str, Any] | None = None) -> None:
-        # Unknown/unsupported optional values must be absent rather than exposed
-        # as misleading null/zero semantics in JavaScript. This is especially
-        # important for OCR confidence, which GLM-OCR currently does not report.
         clean_payload = {
             key: value
             for key, value in (payload or {}).items()
@@ -89,49 +77,12 @@ class WebBridge(QObject):
                     dict(item) for item in devices if isinstance(item, dict)
                 ]
         self._publish(event_name, data)
-        if event_name == "model_loading":
-            device = str(
-                data.get("device") or self._controller.settings.default_device
+        if event_name == "queued_operation_failed":
+            kind = str(data.get("kind") or "operazione")
+            self._error(
+                f"Impossibile avviare {kind} dopo il caricamento del modello.",
+                details=str(data.get("error") or ""),
             )
-            self._start_model_worker(device)
-
-    def _start_model_worker(self, device: str) -> None:
-        with self._model_thread_lock:
-            if self._shutdown:
-                return
-            if self._model_thread is not None and self._model_thread.is_alive():
-                return
-
-            def load() -> None:
-                try:
-                    self._controller.load_model_sync(device)
-                    self._publish(
-                        "model_loaded",
-                        {
-                            "device": self._controller.engine.device,
-                            "backend": self._controller.engine.backend,
-                        },
-                    )
-                except OperationCancelledError:
-                    self._publish("model_load_cancelled", {"device": device})
-                except Exception as exc:
-                    logger.exception("Caricamento modello fallito")
-                    self._publish(
-                        "model_load_failed",
-                        {"device": device, "error": str(exc)},
-                    )
-                finally:
-                    with self._model_thread_lock:
-                        if self._model_thread is threading.current_thread():
-                            self._model_thread = None
-
-            thread = threading.Thread(
-                target=load,
-                name="model-load-worker",
-                daemon=True,
-            )
-            self._model_thread = thread
-            thread.start()
 
     def _device_dicts(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         return [
@@ -156,10 +107,10 @@ class WebBridge(QObject):
             "settings": settings,
             "runtime": {
                 "operation": self._controller.operation,
-                "model_ready": self._controller.engine.is_initialized,
-                "device": self._controller.engine.device,
-                "backend": self._controller.engine.backend,
-                "active_batch_id": self._controller.process_manager.active_job_id,
+                "model_ready": self._controller.model_ready,
+                "device": self._controller.model_device,
+                "backend": self._controller.model_backend,
+                "active_batch_id": self._controller.active_batch_id,
             },
             "devices": list(self._devices_snapshot),
             "limits": {
@@ -183,7 +134,7 @@ class WebBridge(QObject):
 
     @Slot()
     def initializeBackend(self) -> None:
-        """Initialize detection/controller off the Qt GUI thread."""
+        """Initialize hardware detection/controller off the Qt GUI thread."""
         with self._init_thread_lock:
             if self._shutdown:
                 return
@@ -335,9 +286,7 @@ class WebBridge(QObject):
     def reloadModel(self) -> str:
         try:
             if self._controller.operation != OP_IDLE:
-                raise RuntimeError(
-                    "Attendi la conclusione dell'operazione in corso"
-                )
+                raise RuntimeError("Attendi la conclusione dell'operazione in corso")
             self._controller.request_model_load(
                 self._controller.settings.default_device
             )
@@ -467,10 +416,5 @@ class WebBridge(QObject):
             init_thread = self._init_thread
         if init_thread is not None and init_thread.is_alive():
             init_thread.join(timeout=max(0.0, wait_ms / 1000.0))
-
-        with self._model_thread_lock:
-            model_thread = self._model_thread
-        if model_thread is not None and model_thread.is_alive():
-            model_thread.join(timeout=max(0.0, wait_ms / 1000.0))
 
         self._controller.shutdown()

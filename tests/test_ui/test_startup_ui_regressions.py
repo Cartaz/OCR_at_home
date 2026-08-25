@@ -65,6 +65,7 @@ def test_single_result_and_pdf_page_save_controls_delegate_to_core_output_workfl
     bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
     controller = (ROOT / "core" / "app_controller.py").read_text(encoding="utf-8")
     output = (ROOT / "core" / "output_workflow.py").read_text(encoding="utf-8")
+    event_bridge = (ROOT / "ui" / "event_bridge.py").read_text(encoding="utf-8")
 
     assert 'src="save_ui.js"' in html
     assert 'id="save-single-txt-button"' in html
@@ -74,16 +75,30 @@ def test_single_result_and_pdf_page_save_controls_delegate_to_core_output_workfl
     assert "saveSingleResult" in save_js
     assert "saveSinglePdfPages" in save_js
     assert "completedSourcePath" in save_js
+    assert "single_output_saved" in save_js
+    assert "single_output_save_failed" in save_js
+
     assert "def saveSingleResult" in bridge
     assert "def saveSinglePdfPages" in bridge
-    assert "self._controller.save_single_result" in bridge
-    assert "self._controller.save_single_pdf_pages" in bridge
+    assert "self._controller.request_save_single_result" in bridge
+    assert "self._controller.request_save_single_pdf_pages" in bridge
+    assert "self._controller.save_single_result(" not in bridge
+    assert "self._controller.save_single_pdf_pages(" not in bridge
     assert "write_ocr_text" not in bridge
     assert "write_ocr_pages" not in bridge
+    assert "threading" not in bridge
+
     assert "def save_single_result" in controller
     assert "def save_single_pdf_pages" in controller
+    assert "def request_save_single_result" in controller
+    assert "def request_save_single_pdf_pages" in controller
+    assert "def request_save_single_result" in output
+    assert "def request_save_single_pdf_pages" in output
+    assert "manual-output-" in output
     assert "write_ocr_text" in output
     assert "write_ocr_pages" in output
+    assert '"single_output_saved"' in event_bridge
+    assert '"single_output_save_failed"' in event_bridge
 
 
 def test_batch_autosave_controls_are_native_and_core_owned() -> None:

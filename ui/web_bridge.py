@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class WebBridge(QObject):
-    """Thin presentation bridge; operational state remains in Python core."""
+    """Thin presentation adapter; operational state and policy remain in core."""
 
     event = Signal(str)
 
@@ -45,6 +45,12 @@ class WebBridge(QObject):
         self._devices_snapshot: list[dict[str, Any]] = []
         self._shutdown = False
 
+        # Qt owns scheduling only; idle policy and state live in AppController.
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setInterval(30_000)
+        self._idle_timer.timeout.connect(self._check_idle_unload)
+        self._idle_timer.start()
+
     def set_window(self, window: QWidget) -> None:
         self._window = window
 
@@ -58,9 +64,7 @@ class WebBridge(QObject):
             for key, value in (payload or {}).items()
             if value is not None
         }
-        self.event.emit(
-            self._json({"type": event_name, "payload": clean_payload})
-        )
+        self.event.emit(self._json({"type": event_name, "payload": clean_payload}))
 
     def _error(self, message: str, *, details: str = "") -> None:
         self._publish("ui_error", {"message": message, "details": details})
@@ -216,8 +220,8 @@ class WebBridge(QObject):
     def startSingleOcr(self, raw_path: str) -> str:
         try:
             path = self._validate_path(raw_path)
-            self._controller.start_ocr(path)
-            return self._json({"ok": True})
+            queued = self._controller.start_ocr_or_queue(path)
+            return self._json({"ok": True, "queued": queued})
         except Exception as exc:
             logger.warning("Avvio OCR rifiutato: %s", exc)
             self._error("Impossibile avviare l'OCR.", details=str(exc))
@@ -232,12 +236,16 @@ class WebBridge(QObject):
             if not raw_paths:
                 raise ValueError("Seleziona almeno un file")
             if len(raw_paths) > AppMeta.MAX_BATCH_SIZE:
-                raise ValueError(
-                    f"Massimo {AppMeta.MAX_BATCH_SIZE} file per batch"
-                )
+                raise ValueError(f"Massimo {AppMeta.MAX_BATCH_SIZE} file per batch")
             paths = [self._validate_path(str(path)) for path in raw_paths]
-            job = self._controller.run_batch(paths)
-            return self._json({"ok": True, "job_id": job.job_id})
+            queued, job = self._controller.run_batch_or_queue(paths)
+            return self._json(
+                {
+                    "ok": True,
+                    "queued": queued,
+                    "job_id": "" if job is None else job.job_id,
+                }
+            )
         except Exception as exc:
             logger.warning("Avvio batch rifiutato: %s", exc)
             self._error("Impossibile avviare il batch.", details=str(exc))
@@ -275,6 +283,25 @@ class WebBridge(QObject):
             return self._json({"ok": False, "error": str(exc)})
 
     @Slot(result=str)
+    def unloadModel(self) -> str:
+        try:
+            if self._controller.operation != OP_IDLE:
+                raise RuntimeError("Attendi la conclusione dell'operazione in corso")
+            started = self._controller.request_model_unload()
+            return self._json({"ok": True, "already_unloaded": not started})
+        except Exception as exc:
+            self._error("Impossibile scaricare il modello.", details=str(exc))
+            return self._json({"ok": False, "error": str(exc)})
+
+    def _check_idle_unload(self) -> None:
+        if self._shutdown:
+            return
+        try:
+            self._controller.check_idle_model_unload()
+        except Exception:
+            logger.exception("Auto-unload modello non avviato")
+
+    @Slot(result=str)
     def refreshHardware(self) -> str:
         """Start a core-owned refresh and return immediately with cached devices."""
         try:
@@ -289,8 +316,33 @@ class WebBridge(QObject):
         except Exception as exc:
             return self._json({"ok": False, "error": str(exc)})
 
+    @Slot(str, str, result=str)
+    def saveSingleResult(self, source_path: str, file_format: str) -> str:
+        try:
+            request_id = self._controller.request_save_single_result(
+                source_path,
+                file_format,
+            )
+            return self._json({"ok": True, "request_id": request_id})
+        except Exception as exc:
+            logger.warning("Richiesta salvataggio risultato OCR rifiutata: %s", exc)
+            return self._json({"ok": False, "error": str(exc)})
+
+    @Slot(str, str, result=str)
+    def saveSinglePdfPages(self, source_path: str, file_format: str) -> str:
+        try:
+            request_id = self._controller.request_save_single_pdf_pages(
+                source_path,
+                file_format,
+            )
+            return self._json({"ok": True, "request_id": request_id})
+        except Exception as exc:
+            logger.warning("Richiesta salvataggio pagine PDF rifiutata: %s", exc)
+            return self._json({"ok": False, "error": str(exc)})
+
     @Slot(str, result=str)
     def updateSettings(self, payload_json: str) -> str:
+        """Validate and persist supported settings through the controller."""
         try:
             payload = json.loads(payload_json)
             if not isinstance(payload, dict):
@@ -299,6 +351,11 @@ class WebBridge(QObject):
                 "language",
                 "output_dir",
                 "preprocessing_enabled",
+                "batch_auto_save",
+                "batch_output_format",
+                "batch_save_pdf_pages",
+                "load_model_at_startup",
+                "model_auto_unload_minutes",
             }
             overrides = {
                 key: value for key, value in payload.items() if key in allowed
@@ -315,6 +372,24 @@ class WebBridge(QObject):
                 overrides["preprocessing_enabled"] = bool(
                     overrides["preprocessing_enabled"]
                 )
+            for key in (
+                "batch_auto_save",
+                "batch_save_pdf_pages",
+                "load_model_at_startup",
+            ):
+                if key in overrides:
+                    overrides[key] = bool(overrides[key])
+            if "batch_output_format" in overrides:
+                fmt = str(overrides["batch_output_format"]).strip().lower().lstrip(".")
+                if fmt not in {"txt", "md"}:
+                    raise ValueError("Formato batch supportato: txt oppure md")
+                overrides["batch_output_format"] = fmt
+            if "model_auto_unload_minutes" in overrides:
+                minutes = int(overrides["model_auto_unload_minutes"])
+                if not 0 <= minutes <= 1440:
+                    raise ValueError("Auto-unload modello deve essere tra 0 e 1440 minuti")
+                overrides["model_auto_unload_minutes"] = minutes
+
             self._controller.update_settings(**overrides)
             return self._json(
                 {"ok": True, "settings": asdict(self._controller.settings)}
@@ -383,6 +458,7 @@ class WebBridge(QObject):
         if self._shutdown:
             return
         self._shutdown = True
+        self._idle_timer.stop()
         self._events.shutdown(wait_ms=wait_ms)
         try:
             self._controller.cancel_model_loading()

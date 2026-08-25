@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from config.settings import Settings
-from ui.app_web_bridge import AppWebBridge
+from ui.web_bridge import WebBridge
 
 
 class _DummyEngine:
@@ -50,10 +50,10 @@ class _DummyController:
         pass
 
 
-def _bridge(tmp_path: Path, **overrides: object) -> tuple[AppWebBridge, _DummyController]:
+def _bridge(tmp_path: Path, **overrides: object) -> tuple[WebBridge, _DummyController]:
     settings = Settings(output_dir=str(tmp_path)).with_(**overrides)
     controller = _DummyController(settings)
-    return AppWebBridge(controller), controller
+    return WebBridge(controller), controller
 
 
 def test_output_settings_are_validated_and_persisted_in_controller(tmp_path: Path) -> None:
@@ -81,6 +81,7 @@ def test_output_settings_are_validated_and_persisted_in_controller(tmp_path: Pat
         assert invalid["ok"] is False
         assert controller.settings.batch_output_format == "md"
     finally:
+        bridge._idle_timer.stop()
         bridge._events.shutdown()
 
 
@@ -93,6 +94,7 @@ def test_single_save_returns_request_id_without_waiting_for_file(tmp_path: Path)
         assert controller.saved_single == (source, "txt")
         assert list(tmp_path.iterdir()) == []
     finally:
+        bridge._idle_timer.stop()
         bridge._events.shutdown()
 
 
@@ -105,4 +107,5 @@ def test_pdf_page_save_returns_request_id_without_waiting_for_files(tmp_path: Pa
         assert controller.saved_pages == (source, "md")
         assert list(tmp_path.iterdir()) == []
     finally:
+        bridge._idle_timer.stop()
         bridge._events.shutdown()

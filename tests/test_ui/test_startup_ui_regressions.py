@@ -5,11 +5,13 @@ ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "ui" / "web"
 
 
-def test_main_uses_consolidated_non_blocking_web_bridge() -> None:
+def test_main_uses_one_non_blocking_web_bridge() -> None:
     text = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "from ui.app_web_bridge import AppWebBridge" in text
-    assert "bridge = AppWebBridge(" in text
+    assert "from ui.web_bridge import WebBridge" in text
+    assert "bridge = WebBridge(" in text
     assert 'channel.registerObject("backend", bridge)' in text
+    assert "AppWebBridge" not in text
+    assert not (ROOT / "ui" / "app_web_bridge.py").exists()
     assert "ResponsiveWebBridge" not in text
     assert "settings_ui.js" not in text
     assert "runJavaScript" not in text
@@ -62,7 +64,7 @@ def test_language_selector_is_native_html_and_confidence_control_is_removed() ->
 def test_single_result_and_pdf_page_save_controls_delegate_to_core_output_workflow() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
-    bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
+    bridge = (ROOT / "ui" / "web_bridge.py").read_text(encoding="utf-8")
     controller = (ROOT / "core" / "app_controller.py").read_text(encoding="utf-8")
     output = (ROOT / "core" / "output_workflow.py").read_text(encoding="utf-8")
     event_bridge = (ROOT / "ui" / "event_bridge.py").read_text(encoding="utf-8")
@@ -105,7 +107,7 @@ def test_batch_autosave_controls_are_native_and_core_owned() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
     settings = (ROOT / "config" / "settings.py").read_text(encoding="utf-8")
-    bridge = (ROOT / "ui" / "app_web_bridge.py").read_text(encoding="utf-8")
+    bridge = (ROOT / "ui" / "web_bridge.py").read_text(encoding="utf-8")
     output = (ROOT / "core" / "output_workflow.py").read_text(encoding="utf-8")
     event_bridge = (ROOT / "ui" / "event_bridge.py").read_text(encoding="utf-8")
 

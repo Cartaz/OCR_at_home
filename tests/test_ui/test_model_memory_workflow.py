@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from config.settings import Settings
-from ui.app_web_bridge import AppWebBridge
+from ui.web_bridge import WebBridge
 
 
 class _DummyEngine:
@@ -80,15 +80,6 @@ class _DummyController:
     def update_settings(self, **overrides: object) -> None:
         self.settings = self.settings.with_(**overrides)
 
-    def save_single_result(self, source_path: str, file_format: str) -> Path:
-        return Path(self.settings.output_dir) / f"{Path(source_path).stem}.{file_format}"
-
-    def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
-        return [
-            Path(self.settings.output_dir)
-            / f"{Path(source_path).stem}-page-001.{file_format}"
-        ]
-
     def cancel_model_loading(self) -> None:
         pass
 
@@ -107,13 +98,13 @@ def _bridge(
     *,
     initialized: bool = False,
     **overrides: object,
-) -> tuple[AppWebBridge, _DummyController]:
+) -> tuple[WebBridge, _DummyController]:
     settings = Settings(output_dir=str(tmp_path)).with_(**overrides)
     controller = _DummyController(settings, initialized=initialized)
-    return AppWebBridge(controller), controller
+    return WebBridge(controller), controller
 
 
-def _cleanup(bridge: AppWebBridge) -> None:
+def _cleanup(bridge: WebBridge) -> None:
     bridge._idle_timer.stop()
     bridge._events.shutdown()
 

@@ -10,10 +10,13 @@
 - Il frontend usa hook espliciti invece di monkey-patching di funzioni globali e non reinvia più il testo OCR visualizzato a Python come fonte di persistenza.
 - I salvataggi manuali sono asincroni rispetto al thread Qt; log rotation e tail bounded impediscono crescita non limitata del costo di polling.
 - `WebEngine` blocca la navigazione remota interna e delega HTTP/HTTPS al browser di sistema.
+- Gli input immagine transitori della clipboard sono posseduti da `InputStaging` in una directory XDG cache per sessione e rimossi deterministicamente allo shutdown.
 
 ### UX e accessibilità
 
 - Immagini e PDF locali possono essere trascinati nella finestra: Qt acquisisce solo URL file locali, `WebBridge` applica la validazione canonica e il frontend riceve esclusivamente path già validati.
+- `Ctrl+V` incolla un'immagine dagli appunti come input OCR locale; l'incolla testuale nei campi editabili resta invariato.
+- Drag & drop e clipboard condividono le stesse transizioni di selezione nel modulo `input_ui.js`, evitando percorsi UI divergenti.
 - È possibile rimuovere singoli documenti dalla coda batch prima dell'avvio senza introdurre nuovo stato canonico o API backend.
 - Aggiunte scorciatoie `Ctrl+O`, `Ctrl+Enter` e `Ctrl+Shift+C`, delegate ai controlli esistenti e accompagnate da `aria-keyshortcuts`/tooltip.
 - Le operazioni OCR, batch e model lifecycle espongono `aria-busy`; i progressbar pubblicano un `aria-valuetext` significativo.

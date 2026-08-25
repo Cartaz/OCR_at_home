@@ -1,4 +1,4 @@
-"""Application WebBridge capabilities beyond OCR lifecycle presentation."""
+"""Application WebBridge capabilities beyond base OCR presentation."""
 
 from __future__ import annotations
 
@@ -14,27 +14,16 @@ from PySide6.QtCore import QTimer, Slot
 
 from core.app_controller import OP_IDLE
 from core.exceptions import OperationCancelledError
-from core.output_writer import (
-    split_combined_pdf_text,
-    write_ocr_pages,
-    write_ocr_text,
-)
 from ui.web_bridge import WebBridge
 
 logger = logging.getLogger(__name__)
 
 
 class AppWebBridge(WebBridge):
-    """WebBridge plus durable output and model-memory lifecycle actions."""
+    """Presentation adapter for model-memory and output actions."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._single_completed_source = ""
-        self._single_pdf_pages: dict[str, dict[int, str]] = {}
-        self._batch_saved_count = 0
-        self._batch_save_failures = 0
-        self._batch_output_snapshot: dict[str, Any] = {}
-
         self._pending_model_action: tuple[str, Callable[[], None]] | None = None
         self._pending_model_action_lock = threading.Lock()
         self._idle_since = time.monotonic()
@@ -42,19 +31,6 @@ class AppWebBridge(WebBridge):
         self._idle_timer.setInterval(30_000)
         self._idle_timer.timeout.connect(self._check_idle_unload)
         self._idle_timer.start()
-
-    @staticmethod
-    def _canonical_source(source_path: str) -> str:
-        return str(Path(source_path).expanduser().resolve()) if source_path else ""
-
-    def _snapshot_batch_output(self) -> None:
-        settings = self._controller.settings
-        self._batch_output_snapshot = {
-            "enabled": settings.batch_auto_save,
-            "format": settings.batch_output_format,
-            "pdf_pages": settings.batch_save_pdf_pages,
-            "output_dir": settings.output_dir,
-        }
 
     def _touch_idle_clock(self) -> None:
         self._idle_since = time.monotonic()
@@ -101,54 +77,15 @@ class AppWebBridge(WebBridge):
     @Slot(str, object)
     def _on_core_event(self, event_name: str, payload: object) -> None:
         data = dict(payload) if isinstance(payload, dict) else {}
-
-        if event_name == "ocr_started":
-            source = self._canonical_source(str(data.get("image_path") or ""))
-            self._single_completed_source = ""
-            if source:
-                self._single_pdf_pages.pop(source, None)
-        elif event_name == "pdf_page_completed" and data.get("mode") == "single":
-            source = self._canonical_source(str(data.get("pdf_path") or ""))
-            page_num = int(data.get("page_num") or 0)
-            if source and page_num > 0:
-                self._single_pdf_pages.setdefault(source, {})[page_num] = str(
-                    data.get("text") or ""
-                )
-        elif event_name == "ocr_completed" and data.get("mode") == "single":
-            self._single_completed_source = self._canonical_source(
-                str(data.get("image_path") or "")
-            )
-        elif event_name in {"ocr_cancelled", "ocr_failed"}:
-            self._single_completed_source = ""
-        elif event_name == "batch_started":
-            self._batch_saved_count = 0
-            self._batch_save_failures = 0
-            self._snapshot_batch_output()
-        elif event_name == "operation_changed" and data.get("operation") == OP_IDLE:
+        if event_name == "operation_changed" and data.get("operation") == OP_IDLE:
             self._touch_idle_clock()
 
-        # Publish the core event first so the normal UI state is current before
-        # any output-status or lifecycle follow-up event is emitted.
         super()._on_core_event(event_name, data)
 
         if event_name == "model_unloading":
             self._start_unload_worker()
         elif event_name == "model_unloaded":
             self._touch_idle_clock()
-        elif event_name == "batch_task_completed":
-            self._auto_save_batch_result(data)
-        elif event_name == "batch_completed" and self._batch_output_snapshot.get("enabled"):
-            self._publish(
-                "batch_output_summary",
-                {
-                    "saved": self._batch_saved_count,
-                    "failed": self._batch_save_failures,
-                    "output_dir": self._batch_output_snapshot.get("output_dir", ""),
-                },
-            )
-            self._batch_output_snapshot = {}
-        elif event_name in {"batch_cancelled", "batch_failed"}:
-            self._batch_output_snapshot = {}
 
     def _start_model_worker(self, device: str) -> None:
         """Load/reload the model off-GUI and resume one queued OCR action."""
@@ -239,68 +176,6 @@ class AppWebBridge(WebBridge):
         except Exception:
             logger.exception("Auto-unload modello non avviato")
 
-    def _require_completed_single(self, source_path: str) -> str:
-        source = self._canonical_source(source_path)
-        if not source or source != self._single_completed_source:
-            raise RuntimeError(
-                "Il risultato selezionato non corrisponde a un OCR completato."
-            )
-        return source
-
-    def _auto_save_batch_result(self, data: dict[str, Any]) -> None:
-        options = self._batch_output_snapshot
-        if not options.get("enabled"):
-            return
-
-        source = str(data.get("image_path") or "")
-        text = str(data.get("text") or "")
-        if not source:
-            self._batch_save_failures += 1
-            self._publish(
-                "batch_output_save_failed",
-                {"error": "Percorso sorgente batch mancante"},
-            )
-            return
-
-        combined_path: Path | None = None
-        page_paths: list[Path] = []
-        try:
-            combined_path = write_ocr_text(
-                str(options["output_dir"]),
-                source,
-                text,
-                str(options["format"]),
-            )
-            if options.get("pdf_pages") and Path(source).suffix.lower() == ".pdf":
-                pages = split_combined_pdf_text(text)
-                page_paths = write_ocr_pages(
-                    str(options["output_dir"]),
-                    source,
-                    pages,
-                    str(options["format"]),
-                )
-            self._batch_saved_count += 1
-            logger.info("Output batch salvato per %s in %s", source, combined_path)
-            self._publish(
-                "batch_output_saved",
-                {
-                    "image_path": source,
-                    "path": str(combined_path),
-                    "page_paths": [str(path) for path in page_paths],
-                },
-            )
-        except Exception as exc:
-            self._batch_save_failures += 1
-            logger.warning("Salvataggio automatico batch fallito per %s: %s", source, exc)
-            self._publish(
-                "batch_output_save_failed",
-                {
-                    "image_path": source,
-                    "error": str(exc),
-                    "combined_path": str(combined_path) if combined_path else "",
-                },
-            )
-
     @Slot(str, result=str)
     def startSingleOcr(self, raw_path: str) -> str:
         try:
@@ -361,18 +236,13 @@ class AppWebBridge(WebBridge):
     def saveSingleResult(
         self,
         source_path: str,
-        text: str,
+        displayed_text: str,
         file_format: str,
     ) -> str:
+        """Persist the Python-owned canonical result; displayed_text is legacy UI input."""
+        _ = displayed_text
         try:
-            source = self._require_completed_single(source_path)
-            destination = write_ocr_text(
-                self._controller.settings.output_dir,
-                source,
-                text,
-                file_format,
-            )
-            logger.info("Risultato OCR salvato in %s", destination)
+            destination = self._controller.save_single_result(source_path, file_format)
             return self._json(
                 {
                     "ok": True,
@@ -387,20 +257,7 @@ class AppWebBridge(WebBridge):
     @Slot(str, str, result=str)
     def saveSinglePdfPages(self, source_path: str, file_format: str) -> str:
         try:
-            source = self._require_completed_single(source_path)
-            page_map = self._single_pdf_pages.get(source) or {}
-            page_numbers = sorted(page_map)
-            if page_numbers != list(range(1, len(page_numbers) + 1)):
-                raise RuntimeError("Sequenza pagine PDF incompleta o non valida")
-            if not page_numbers:
-                raise RuntimeError("Nessuna pagina PDF completata da salvare")
-            outputs = write_ocr_pages(
-                self._controller.settings.output_dir,
-                source,
-                [page_map[number] for number in page_numbers],
-                file_format,
-            )
-            logger.info("Salvate %d pagine OCR separate per %s", len(outputs), source)
+            outputs = self._controller.save_single_pdf_pages(source_path, file_format)
             return self._json(
                 {
                     "ok": True,

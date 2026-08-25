@@ -1,9 +1,9 @@
-PySide6>=6.6.0
-Pillow>=10.0.0
-numpy>=1.26.0
-huggingface_hub>=0.27.0
-PyMuPDF>=1.24.0
+# Runtime dependencies. Keep a tested minimum and reject unreviewed major-version jumps.
+PySide6>=6.6.0,<7
+Pillow>=10.0.0,<13
+numpy>=1.26.0,<3
+huggingface_hub>=0.27.0,<2
+PyMuPDF>=1.24.0,<2
 
 # llama-server è un runtime esterno, non un pacchetto Python.
-# Su Arch/CachyOS il pacchetto ufficiale è `llama-cpp`.
-# Per la build SYCL locale e riproducibile usare ./install.sh.
+# La build SYCL riproducibile è gestita da ./install.sh e pinna llama.cpp.

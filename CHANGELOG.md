@@ -11,6 +11,14 @@
 - I salvataggi manuali sono asincroni rispetto al thread Qt; log rotation e tail bounded impediscono crescita non limitata del costo di polling.
 - `WebEngine` blocca la navigazione remota interna e delega HTTP/HTTPS al browser di sistema.
 
+### UX e accessibilità
+
+- È possibile rimuovere singoli documenti dalla coda batch prima dell'avvio senza introdurre nuovo stato canonico o API backend.
+- Aggiunte scorciatoie `Ctrl+O`, `Ctrl+Enter` e `Ctrl+Shift+C`, delegate ai controlli esistenti e accompagnate da `aria-keyshortcuts`/tooltip.
+- Le operazioni OCR, batch e model lifecycle espongono `aria-busy`; i progressbar pubblicano un `aria-valuetext` significativo.
+- Gli errori operativi urgenti usano alert assertivi e gestione del focus con ripristino alla chiusura, mentre gli avvisi informativi restano polite e non intrusivi.
+- Gli stati accessibili sono coperti da test reali Qt WebEngine, inclusi focus, ruoli live, busy state e testo di avanzamento.
+
 ### Bug corretti
 
 - Completato il forwarding EventBus -> Qt per gli eventi di completamento/fallimento di model lifecycle, hardware e operazioni accodate, evitando UI stale dopo eventi core corretti.

@@ -20,6 +20,7 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 const uiExtensions = [];
+let noticeReturnFocus = null;
 
 function registerUiExtension(extension) {
     if (extension && typeof extension === "object") uiExtensions.push(extension);
@@ -68,18 +69,35 @@ function setView(name) {
     if (name === "logs") refreshLogs();
 }
 
-function showNotice(title, message, details = "") {
+function showNotice(title, message, details = "", urgent = false) {
+    const notice = $("#notice");
     $("#notice-title").textContent = title;
     $("#notice-message").textContent = message;
     $("#notice-details").textContent = details;
     const hasDetails = Boolean(details && details.trim());
     $("#notice-details-wrap").classList.toggle("hidden", !hasDetails);
     $("#notice-details-wrap").open = false;
-    $("#notice").classList.remove("hidden");
+    notice.setAttribute("role", urgent ? "alert" : "status");
+    notice.setAttribute("aria-live", urgent ? "assertive" : "polite");
+    notice.setAttribute("aria-atomic", "true");
+    notice.tabIndex = -1;
+    notice.classList.remove("hidden");
+    if (urgent) {
+        const active = document.activeElement;
+        noticeReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+        notice.focus();
+    } else {
+        noticeReturnFocus = null;
+    }
 }
 
 function hideNotice() {
     $("#notice").classList.add("hidden");
+    const target = noticeReturnFocus;
+    noticeReturnFocus = null;
+    if (target instanceof HTMLElement && document.contains(target) && !target.matches(":disabled")) {
+        target.focus();
+    }
 }
 
 function operationLabel(operation) {
@@ -110,6 +128,12 @@ function updateOperationUi() {
     $("#ocr-operation-label").classList.toggle("active", op === "ocr");
     $("#batch-operation-label").textContent = op === "batch" ? label : "In attesa";
     $("#batch-operation-label").classList.toggle("active", op === "batch");
+    $("#view-ocr").setAttribute("aria-busy", String(op === "ocr"));
+    $("#view-batch").setAttribute("aria-busy", String(op === "batch"));
+    $("#view-settings").setAttribute(
+        "aria-busy",
+        String(op === "model_loading" || op === "model_unloading"),
+    );
 
     $("#single-file-button").disabled = busy;
     $("#single-start-button").disabled = busy || !state.modelReady || !state.singlePath;
@@ -155,7 +179,12 @@ function updateBackendPanel() {
 function setProgress(rootSelector, percent, valueText) {
     const root = $(rootSelector);
     const value = Math.max(0, Math.min(100, Number(percent) || 0));
-    root.setAttribute("aria-valuenow", String(Math.round(value)));
+    const rounded = Math.round(value);
+    root.setAttribute("aria-valuenow", String(rounded));
+    root.setAttribute(
+        "aria-valuetext",
+        valueText !== undefined && String(valueText).trim() ? String(valueText) : `${rounded}%`,
+    );
     root.querySelector(".progress-fill").style.width = `${value}%`;
     if (valueText !== undefined) {
         const target = rootSelector === "#single-progress" ? $("#single-progress-value") : $("#batch-progress-value");
@@ -313,7 +342,7 @@ function handleKeyboardShortcut(event) {
     }
 
     if (key === "enter" && !event.shiftKey) {
-        if (!(["ocr", "batch"].includes(state.activeView))) return;
+        if (!( ["ocr", "batch"].includes(state.activeView))) return;
         event.preventDefault();
         if (event.repeat) return;
         clickIfEnabled(state.activeView === "batch" ? "#batch-start-button" : "#single-start-button");
@@ -341,12 +370,23 @@ function configureKeyboardShortcuts() {
     }
 }
 
+function configureAccessibleStates() {
+    $("#notice").setAttribute("aria-atomic", "true");
+    $("#notice").tabIndex = -1;
+    $("#single-result-meta").setAttribute("aria-live", "polite");
+    $("#single-result-meta").setAttribute("aria-atomic", "true");
+    $("#batch-count-label").setAttribute("aria-live", "polite");
+    $("#batch-count-label").setAttribute("aria-atomic", "true");
+    $("#single-progress").setAttribute("aria-label", "Progresso OCR");
+    $("#batch-progress").setAttribute("aria-label", "Progresso batch OCR");
+}
+
 function handleEvent(raw) {
     let message;
     try {
         message = JSON.parse(raw);
     } catch (error) {
-        showNotice("Errore UI", "Evento backend non leggibile.", String(error));
+        showNotice("Errore UI", "Evento backend non leggibile.", String(error), true);
         return;
     }
     const type = message.type;
@@ -387,7 +427,7 @@ function handleEvent(raw) {
             setModelStatus("Backend non pronto", false);
             updateBackendPanel();
             updateOperationUi();
-            showNotice("Backend non disponibile", "Il modello OCR non è stato caricato.", String(payload.error || ""));
+            showNotice("Backend non disponibile", "Il modello OCR non è stato caricato.", String(payload.error || ""), true);
             break;
         case "config_changed":
             break;
@@ -431,7 +471,7 @@ function handleEvent(raw) {
         case "ocr_failed":
             $("#single-progress-block").classList.add("hidden");
             $("#single-result-meta").textContent = "Elaborazione fallita.";
-            showNotice("OCR non riuscito", "Il documento non è stato elaborato.", String(payload.error || ""));
+            showNotice("OCR non riuscito", "Il documento non è stato elaborato.", String(payload.error || ""), true);
             break;
         case "batch_started":
             state.batchJobId = String(payload.job_id || "");
@@ -481,10 +521,10 @@ function handleEvent(raw) {
             break;
         case "batch_failed":
             $("#batch-progress-label").textContent = "Batch terminato con errori";
-            showNotice("Batch non completato", "Uno o più documenti non sono stati elaborati.", String(payload.error || ""));
+            showNotice("Batch non completato", "Uno o più documenti non sono stati elaborati.", String(payload.error || ""), true);
             break;
         case "ui_error":
-            showNotice("Operazione non disponibile", String(payload.message || "Errore"), String(payload.details || ""));
+            showNotice("Operazione non disponibile", String(payload.message || "Errore"), String(payload.details || ""), true);
             break;
         default:
             break;
@@ -504,12 +544,13 @@ function bindHandlers() {
     $$(".nav-item").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
     $("#notice-close").addEventListener("click", hideNotice);
     configureKeyboardShortcuts();
+    configureAccessibleStates();
     document.addEventListener("keydown", handleKeyboardShortcut);
 
     $("#single-file-button").addEventListener("click", async () => {
         const result = await callNative("chooseSingleFile");
         if (!result.ok) {
-            showNotice("File non valido", result.error || "Impossibile selezionare il file.");
+            showNotice("File non valido", result.error || "Impossibile selezionare il file.", "", true);
             return;
         }
         if (result.cancelled) return;
@@ -524,7 +565,7 @@ function bindHandlers() {
     $("#single-start-button").addEventListener("click", async () => {
         if (!state.singlePath) return;
         const result = await callNative("startSingleOcr", state.singlePath);
-        if (!result.ok) showNotice("OCR non avviato", result.error || "Operazione non disponibile.");
+        if (!result.ok) showNotice("OCR non avviato", result.error || "Operazione non disponibile.", "", true);
     });
 
     $("#single-cancel-button").addEventListener("click", () => callNative("cancelOperation"));
@@ -536,7 +577,7 @@ function bindHandlers() {
     $("#batch-file-button").addEventListener("click", async () => {
         const result = await callNative("chooseBatchFiles");
         if (!result.ok) {
-            showNotice("Selezione batch non valida", result.error || "Impossibile selezionare i file.");
+            showNotice("Selezione batch non valida", result.error || "Impossibile selezionare i file.", "", true);
             return;
         }
         if (result.cancelled) return;
@@ -550,7 +591,7 @@ function bindHandlers() {
 
     $("#batch-start-button").addEventListener("click", async () => {
         const result = await callNative("startBatch", JSON.stringify(state.batchPaths));
-        if (!result.ok) showNotice("Batch non avviato", result.error || "Operazione non disponibile.");
+        if (!result.ok) showNotice("Batch non avviato", result.error || "Operazione non disponibile.", "", true);
     });
     $("#batch-cancel-button").addEventListener("click", () => callNative("cancelOperation"));
     $("#log-refresh-button").addEventListener("click", refreshLogs);
@@ -559,7 +600,7 @@ function bindHandlers() {
     $("#output-dir-button").addEventListener("click", async () => {
         const result = await callNative("chooseOutputDirectory", $("#output-dir-input").value);
         if (result.ok && !result.cancelled) $("#output-dir-input").value = result.path;
-        else if (!result.ok) showNotice("Directory non disponibile", result.error || "Impossibile selezionare la directory.");
+        else if (!result.ok) showNotice("Directory non disponibile", result.error || "Impossibile selezionare la directory.", "", true);
     });
 
     $("#settings-form").addEventListener("submit", async (event) => {
@@ -569,7 +610,7 @@ function bindHandlers() {
             applySettings(result.settings);
             showNotice("Impostazioni salvate", "Le preferenze sono state aggiornate.");
         } else {
-            showNotice("Impostazioni non salvate", result.error || "Errore sconosciuto.");
+            showNotice("Impostazioni non salvate", result.error || "Errore sconosciuto.", "", true);
         }
     });
 
@@ -579,13 +620,13 @@ function bindHandlers() {
             state.devices = result.devices || [];
             updateBackendPanel();
         } else {
-            showNotice("Rilevamento hardware fallito", result.error || "Errore sconosciuto.");
+            showNotice("Rilevamento hardware fallito", result.error || "Errore sconosciuto.", "", true);
         }
     });
 
     $("#model-reload-button").addEventListener("click", async () => {
         const result = await callNative("reloadModel");
-        if (!result.ok) showNotice("Modello non ricaricato", result.error || "Operazione non disponibile.");
+        if (!result.ok) showNotice("Modello non ricaricato", result.error || "Operazione non disponibile.", "", true);
     });
 
     $("#quit-button").addEventListener("click", () => state.backend?.forceQuit());
@@ -606,7 +647,7 @@ function bindHandlers() {
 async function bootstrap() {
     const result = await callNative("bootstrap");
     if (!result.ok) {
-        showNotice("Avvio UI incompleto", "Impossibile leggere lo stato dell'applicazione.", result.error || "");
+        showNotice("Avvio UI incompleto", "Impossibile leggere lo stato dell'applicazione.", result.error || "", true);
         return;
     }
     const data = result.data;
@@ -627,7 +668,7 @@ async function bootstrap() {
 
 function connectBackend() {
     if (typeof qt === "undefined" || !qt.webChannelTransport || typeof QWebChannel === "undefined") {
-        showNotice("Bridge non disponibile", "La UI deve essere avviata da main.py, non aperta direttamente nel browser.");
+        showNotice("Bridge non disponibile", "La UI deve essere avviata da main.py, non aperta direttamente nel browser.", "", true);
         setModelStatus("Bridge non disponibile", false);
         return;
     }

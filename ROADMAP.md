@@ -205,7 +205,11 @@ Goal: improve speed of use without adding decorative complexity.
   - Batch selection remains temporary JavaScript presentation state; no new backend API was introduced.
   - Removal is disabled outside `idle`, so a submitted/running queue cannot be mutated from the UI.
   - Real Qt WebEngine coverage verifies selection cleanup, count/start state and busy protection.
-- [ ] Review empty/error/loading states for clarity and accessibility.
+- [x] Review empty/error/loading states for clarity and accessibility.
+  - Operational views expose `aria-busy` from the same state that drives the UI controls.
+  - Progressbars publish meaningful `aria-valuetext`; result/count changes remain polite live updates.
+  - Urgent failures use assertive alert semantics with focus restoration, while informational/success notices remain non-intrusive.
+  - Real Qt WebEngine coverage verifies notice roles/focus, busy states and progress text.
 
 Acceptance criteria:
 - Features reduce steps without hiding backend state or errors.

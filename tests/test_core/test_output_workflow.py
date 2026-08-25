@@ -47,6 +47,7 @@ def test_pdf_result_requires_complete_page_sequence(tmp_path: Path) -> None:
     workflow, _settings = _workflow(tmp_path)
     source = str(tmp_path / "document.pdf")
     try:
+        # An incomplete completion invalidates the whole temporary result.
         EventBus.emit(
             "ocr_started",
             {"mode": "single", "image_path": source, "is_pdf": True},
@@ -68,16 +69,22 @@ def test_pdf_result_requires_complete_page_sequence(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError):
             workflow.save_single_result(source, "txt")
 
+        # A new complete OCR may then become the canonical savable result.
         EventBus.emit(
-            "pdf_page_completed",
-            {
-                "mode": "single",
-                "pdf_path": source,
-                "page_num": 2,
-                "total_pages": 2,
-                "text": "pagina due",
-            },
+            "ocr_started",
+            {"mode": "single", "image_path": source, "is_pdf": True},
         )
+        for page_num, text in ((1, "pagina uno"), (2, "pagina due")):
+            EventBus.emit(
+                "pdf_page_completed",
+                {
+                    "mode": "single",
+                    "pdf_path": source,
+                    "page_num": page_num,
+                    "total_pages": 2,
+                    "text": text,
+                },
+            )
         EventBus.emit(
             "ocr_completed",
             {"mode": "single", "image_path": source, "is_pdf": True},

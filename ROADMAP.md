@@ -208,17 +208,21 @@ Acceptance criteria:
 
 Goal: make installation, troubleshooting and upgrades predictable.
 
-- [ ] Add a concise `README.md` covering:
+- [x] Add a concise `README.md` covering:
   - Intel/SYCL requirements;
   - `chmod +x install.sh && ./install.sh`;
   - `.venv/bin/python main.py`;
   - first model download/startup;
   - configuration/log/model paths;
   - troubleshooting.
-- [ ] Add/verify log rotation.
-- [ ] Review dependency version policy for reproducibility without introducing `pyproject.toml`.
-- [ ] Keep `CHANGELOG.md` aligned with user-visible changes.
-- [ ] Periodically remove dead compatibility code and stale tests.
+- [x] Add/verify log rotation.
+- [x] Review dependency version policy for reproducibility without introducing `pyproject.toml`.
+  - Runtime dependencies keep tested minimums and major-version ceilings.
+  - Test-only dependencies live in `requirements-dev.txt`.
+  - llama.cpp remains pinned separately by `install.sh`.
+- [x] Keep `CHANGELOG.md` aligned with user-visible changes.
+- [~] Periodically remove dead compatibility code and stale tests.
+  - The 2026-08-25 strategic cleanup removed bridge/frontend/benchmark compatibility paths that no longer represented useful abstractions.
 
 Acceptance criteria:
 - A clean checkout can be installed and diagnosed using repository documentation alone.

@@ -21,6 +21,11 @@ def _xdg_config_home() -> Path:
     return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
 
 
+def _xdg_cache_home() -> Path:
+    """Restituisce il percorso XDG_CACHE_HOME conforme alla specifica."""
+    return Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache"))
+
+
 class AppMeta:
     """Metadati identificativi dell'applicazione GLM OCR."""
 
@@ -35,7 +40,8 @@ class AppMeta:
     DESKTOP_DIR: Path = Path.home() / ".local" / "share" / "applications"
 
     GGUF_MODEL_ID: str = "ggml-org/GLM-OCR-GGUF"
-    GGUF_MODEL_DIR: Path = Path.home() / ".cache" / "glm-ocr" / "models" / "gguf"
+    GGUF_MODEL_DIR: Path = _xdg_cache_home() / "glm-ocr" / "models" / "gguf"
+    INPUT_CACHE_DIR: Path = _xdg_cache_home() / "glm-ocr" / "inputs"
 
     SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset({
         ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif",
@@ -46,7 +52,7 @@ class AppMeta:
 
 
 class OCRDefaults:
-    """Valori predefiniti per i processi OCR."""
+    """Valori predefiniti per l'OCR."""
 
     DEFAULT_OCR_LANGUAGE: str = "ita+eng"
     DEFAULT_CONFIDENCE_THRESHOLD: float = 0.5

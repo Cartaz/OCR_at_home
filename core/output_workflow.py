@@ -69,7 +69,7 @@ class OutputWorkflow:
         self._batch_saved_count = 0
         self._batch_save_failures = 0
         self._subscriptions: list[tuple[str, Callable[[dict], None]]] = []
-        self._manual_threads: set[threading.Thread] = set()
+        self._manual_thread: threading.Thread | None = None
         self._shutdown = False
         self._subscribe()
 
@@ -220,9 +220,6 @@ class OutputWorkflow:
         kind: str,
         write: Callable[[], dict[str, object]],
     ) -> str:
-        with self._lock:
-            if self._shutdown:
-                raise RuntimeError("Output workflow in arresto")
         request_id = uuid.uuid4().hex
 
         def run() -> None:
@@ -250,7 +247,8 @@ class OutputWorkflow:
                     )
             finally:
                 with self._lock:
-                    self._manual_threads.discard(threading.current_thread())
+                    if self._manual_thread is threading.current_thread():
+                        self._manual_thread = None
 
         thread = threading.Thread(
             target=run,
@@ -260,12 +258,15 @@ class OutputWorkflow:
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("Output workflow in arresto")
-            self._manual_threads.add(thread)
+            if self._manual_thread is not None and self._manual_thread.is_alive():
+                raise RuntimeError("Un salvataggio manuale è già in corso")
+            self._manual_thread = thread
         try:
             thread.start()
         except Exception:
             with self._lock:
-                self._manual_threads.discard(thread)
+                if self._manual_thread is thread:
+                    self._manual_thread = None
             raise
         return request_id
 
@@ -395,21 +396,17 @@ class OutputWorkflow:
             if self._shutdown:
                 return
             self._shutdown = True
-            manual_threads = list(self._manual_threads)
+            manual_thread = self._manual_thread
 
         for event_name, handler in self._subscriptions:
             EventBus.unsubscribe(event_name, handler)
         self._subscriptions.clear()
         self._clear_single_state()
 
-        deadline = time.monotonic() + max(0.0, wait_seconds)
-        for thread in manual_threads:
-            if not thread.is_alive():
-                continue
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        still_alive = [thread.name for thread in manual_threads if thread.is_alive()]
-        if still_alive:
-            logger.warning(
-                "Worker output manuale non terminati entro il timeout: %s",
-                ", ".join(still_alive),
-            )
+        if manual_thread is not None and manual_thread.is_alive():
+            manual_thread.join(timeout=max(0.0, wait_seconds))
+            if manual_thread.is_alive():
+                logger.warning(
+                    "Worker output manuale non terminato entro il timeout: %s",
+                    manual_thread.name,
+                )

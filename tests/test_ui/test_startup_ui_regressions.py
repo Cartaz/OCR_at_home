@@ -108,3 +108,28 @@ def test_batch_autosave_controls_are_native_and_core_owned() -> None:
     assert "BatchOutputOptions" in output
     assert "batch_output_summary" in output
     assert '"batch_output_summary"' in event_bridge
+
+
+def test_frontend_modules_use_explicit_extensions_without_monkey_patching() -> None:
+    app_js = (WEB / "app.js").read_text(encoding="utf-8")
+    save_js = (WEB / "save_ui.js").read_text(encoding="utf-8")
+    model_js = (WEB / "model_ui.js").read_text(encoding="utf-8")
+
+    assert "function registerUiExtension" in app_js
+    assert 'runExtensionHook("applySettings", settings)' in app_js
+    assert 'runExtensionHook("collectSettings", payload)' in app_js
+    assert 'runExtensionHook("onBackendEvent", type, payload)' in app_js
+    assert 'notifyUiState("single_selection_changed"' in app_js
+
+    for module in (save_js, model_js):
+        assert "registerUiExtension({" in module
+        assert "const baseApplySettings" not in module
+        assert "const baseCallNative" not in module
+        assert "const baseHandleEvent" not in module
+        assert "applySettings = function" not in module
+        assert "callNative = function" not in module
+        assert "handleEvent = function" not in module
+        assert "updateOperationUi = function" not in module
+        assert "updateBackendPanel = function" not in module
+
+    assert "MutationObserver" not in save_js

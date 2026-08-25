@@ -41,81 +41,47 @@
         }
     }
 
-    const baseUpdateOperationUi = updateOperationUi;
-    updateOperationUi = function updateOperationUiWithModelMemory() {
-        baseUpdateOperationUi();
-        updateModelControls();
-    };
-
-    const baseUpdateBackendPanel = updateBackendPanel;
-    updateBackendPanel = function updateBackendPanelWithModelMemory() {
-        baseUpdateBackendPanel();
-        updateModelControls();
-    };
-
-    const baseApplySettings = applySettings;
-    applySettings = function applyModelMemorySettings(settings) {
-        baseApplySettings(settings);
-        loadAtStartup.checked = settings.load_model_at_startup !== false;
-        const minutes = String(Number(settings.model_auto_unload_minutes || 0));
-        if (![...autoUnload.options].some((option) => option.value === minutes)) {
-            const option = document.createElement("option");
-            option.value = minutes;
-            option.textContent = `${minutes} minuti`;
-            autoUnload.append(option);
-        }
-        autoUnload.value = minutes;
-        updateModelControls();
-    };
-
-    const baseCallNative = callNative;
-    callNative = function callNativeWithModelMemory(name, ...args) {
-        if (name === "updateSettings" && typeof args[0] === "string") {
-            try {
-                const payload = JSON.parse(args[0]);
-                payload.load_model_at_startup = loadAtStartup.checked;
-                payload.model_auto_unload_minutes = Number(autoUnload.value || 0);
-                args[0] = JSON.stringify(payload);
-            } catch (_error) {
-                // The Python bridge owns canonical validation.
+    registerUiExtension({
+        applySettings(settings) {
+            loadAtStartup.checked = settings.load_model_at_startup !== false;
+            const minutes = String(Number(settings.model_auto_unload_minutes || 0));
+            if (![...autoUnload.options].some((option) => option.value === minutes)) {
+                const option = document.createElement("option");
+                option.value = minutes;
+                option.textContent = `${minutes} minuti`;
+                autoUnload.append(option);
             }
-        }
-        return baseCallNative(name, ...args);
-    };
-
-    const baseHandleEvent = handleEvent;
-    handleEvent = function handleModelMemoryEvent(raw) {
-        let message = null;
-        try {
-            message = JSON.parse(raw);
-        } catch (_error) {
-            // The base handler reports malformed events.
-        }
-
-        baseHandleEvent(raw);
-
-        const type = message?.type;
-        const payload = message?.payload || {};
-        if (type === "model_unloading") {
-            setModelStatus("Scaricamento modello…", true);
-        } else if (type === "model_unloaded") {
-            state.modelReady = false;
-            setModelStatus("Modello scaricato", false);
-            updateBackendPanel();
-            updateOperationUi();
-        } else if (type === "model_loaded") {
+            autoUnload.value = minutes;
             updateModelControls();
-        } else if (type === "model_unload_failed") {
-            showNotice(
-                "Modello non scaricato",
-                "Il backend non è stato rilasciato correttamente.",
-                String(payload.error || "")
-            );
+        },
+        collectSettings(payload) {
+            payload.load_model_at_startup = loadAtStartup.checked;
+            payload.model_auto_unload_minutes = Number(autoUnload.value || 0);
+        },
+        refreshUi() {
             updateModelControls();
-        } else if (type === "hardware_detected") {
+        },
+        onBackendEvent(type, payload) {
+            if (type === "model_unloading") {
+                setModelStatus("Scaricamento modello…", true);
+            } else if (type === "model_unloaded") {
+                state.modelReady = false;
+                setModelStatus("Modello scaricato", false);
+                updateBackendPanel();
+                updateOperationUi();
+            } else if (type === "model_unload_failed") {
+                showNotice(
+                    "Modello non scaricato",
+                    "Il backend non è stato rilasciato correttamente.",
+                    String(payload.error || "")
+                );
+            }
             updateModelControls();
-        }
-    };
+        },
+        initialize() {
+            updateModelControls();
+        },
+    });
 
     unloadButton.addEventListener("click", async () => {
         const result = await callNative("unloadModel");
@@ -126,6 +92,4 @@
             );
         }
     });
-
-    updateModelControls();
 })();

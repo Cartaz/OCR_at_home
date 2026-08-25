@@ -19,6 +19,18 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+const uiExtensions = [];
+
+function registerUiExtension(extension) {
+    if (extension && typeof extension === "object") uiExtensions.push(extension);
+}
+
+function runExtensionHook(name, ...args) {
+    for (const extension of uiExtensions) {
+        const hook = extension[name];
+        if (typeof hook === "function") hook(...args);
+    }
+}
 
 function basename(path) {
     return String(path || "").split(/[\\/]/).pop() || "";
@@ -47,18 +59,13 @@ function setView(name) {
     $$(".nav-item").forEach((button) => {
         const active = button.dataset.view === name;
         button.classList.toggle("active", active);
-        if (active) {
-            button.setAttribute("aria-current", "page");
-        } else {
-            button.removeAttribute("aria-current");
-        }
+        if (active) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
     });
     $$(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
     const active = $(`#view-${name}`);
     $("#view-title").textContent = active?.dataset.title || "GLM OCR";
-    if (name === "logs") {
-        refreshLogs();
-    }
+    if (name === "logs") refreshLogs();
 }
 
 function showNotice(title, message, details = "") {
@@ -79,6 +86,7 @@ function operationLabel(operation) {
     const labels = {
         idle: "In attesa",
         model_loading: "Caricamento modello",
+        model_unloading: "Scaricamento modello",
         ocr: "OCR in corso",
         batch: "Batch in corso",
         shutting_down: "Arresto",
@@ -99,11 +107,9 @@ function updateOperationUi() {
     $("#single-file-button").disabled = busy;
     $("#single-start-button").disabled = busy || !state.modelReady || !state.singlePath;
     $("#single-cancel-button").disabled = op !== "ocr";
-
     $("#batch-file-button").disabled = busy;
     $("#batch-start-button").disabled = busy || !state.modelReady || state.batchPaths.length === 0;
     $("#batch-cancel-button").disabled = op !== "batch";
-
     $("#model-reload-button").disabled = busy;
     $("#hardware-refresh-button").disabled = busy;
     $("#global-cancel-button").classList.toggle("hidden", !busy || op === "shutting_down");
@@ -112,6 +118,7 @@ function updateOperationUi() {
     const sidebarText = op === "idle" ? (state.modelReady ? "Pronto" : "Backend non pronto") : label;
     $("#sidebar-status-text").textContent = sidebarText;
     $("#sidebar-status-dot").classList.toggle("active", state.modelReady || busy);
+    runExtensionHook("refreshUi", "operation");
 }
 
 function setModelStatus(text, active = false) {
@@ -134,6 +141,7 @@ function updateBackendPanel() {
         chip.textContent = "Non pronto";
         chip.classList.remove("active");
     }
+    runExtensionHook("refreshUi", "backend");
 }
 
 function setProgress(rootSelector, percent, valueText) {
@@ -155,12 +163,8 @@ function renderSingleText(text) {
 
 function formatResultMeta(payload) {
     const parts = [];
-    if (Number.isFinite(Number(payload.confidence))) {
-        parts.push(`confidenza ${Math.round(Number(payload.confidence) * 100)}%`);
-    }
-    if (Number(payload.time_ms) > 0) {
-        parts.push(`${(Number(payload.time_ms) / 1000).toFixed(1)} s`);
-    }
+    if (Number.isFinite(Number(payload.confidence))) parts.push(`confidenza ${Math.round(Number(payload.confidence) * 100)}%`);
+    if (Number(payload.time_ms) > 0) parts.push(`${(Number(payload.time_ms) / 1000).toFixed(1)} s`);
     return parts.length ? parts.join(" · ") : "Elaborazione completata";
 }
 
@@ -241,6 +245,21 @@ function applySettings(settings) {
     $("#preprocess-toggle").checked = Boolean(settings.preprocessing_enabled);
     ensureLanguageOption(settings.language);
     $("#output-dir-input").value = String(settings.output_dir || "");
+    runExtensionHook("applySettings", settings);
+}
+
+function collectSettings() {
+    const payload = {
+        preprocessing_enabled: $("#preprocess-toggle").checked,
+        language: $("#language-input").value,
+        output_dir: $("#output-dir-input").value,
+    };
+    runExtensionHook("collectSettings", payload);
+    return payload;
+}
+
+function notifyUiState(type, payload = {}) {
+    runExtensionHook("onUiState", type, payload);
 }
 
 function handleEvent(raw) {
@@ -269,14 +288,14 @@ function handleEvent(raw) {
             updateBackendPanel();
             updateOperationUi();
             break;
-        case "model_load_progress":
-            setModelStatus(String(payload.message || "Caricamento modello…"), true);
-            break;
         case "model_loaded":
             state.modelReady = true;
             setModelStatus("Modello pronto", true);
             updateBackendPanel();
             updateOperationUi();
+            break;
+        case "model_load_progress":
+            setModelStatus(String(payload.message || "Caricamento modello…"), true);
             break;
         case "model_load_cancelled":
             state.modelReady = false;
@@ -391,6 +410,7 @@ function handleEvent(raw) {
         default:
             break;
     }
+    runExtensionHook("onBackendEvent", type, payload);
 }
 
 async function refreshLogs() {
@@ -416,6 +436,7 @@ function bindHandlers() {
         $("#single-file-name").textContent = result.name || basename(result.path);
         $("#single-file-display").title = result.path;
         $("#single-result-meta").textContent = "Pronto per l'elaborazione.";
+        notifyUiState("single_selection_changed", { path: state.singlePath });
         updateOperationUi();
     });
 
@@ -451,7 +472,6 @@ function bindHandlers() {
         if (!result.ok) showNotice("Batch non avviato", result.error || "Operazione non disponibile.");
     });
     $("#batch-cancel-button").addEventListener("click", () => callNative("cancelOperation"));
-
     $("#log-refresh-button").addEventListener("click", refreshLogs);
     $("#copy-log-button").addEventListener("click", () => state.backend?.copyText($("#log-output").textContent || ""));
 
@@ -463,12 +483,7 @@ function bindHandlers() {
 
     $("#settings-form").addEventListener("submit", async (event) => {
         event.preventDefault();
-        const payload = {
-            preprocessing_enabled: $("#preprocess-toggle").checked,
-            language: $("#language-input").value,
-            output_dir: $("#output-dir-input").value,
-        };
-        const result = await callNative("updateSettings", JSON.stringify(payload));
+        const result = await callNative("updateSettings", JSON.stringify(collectSettings()));
         if (result.ok) {
             applySettings(result.settings);
             showNotice("Impostazioni salvate", "Le preferenze sono state aggiornate.");
@@ -547,5 +562,6 @@ document.addEventListener("DOMContentLoaded", () => {
     setView("ocr");
     renderBatchFiles();
     renderBatchResults();
+    runExtensionHook("initialize");
     connectBackend();
 });

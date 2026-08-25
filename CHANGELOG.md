@@ -13,6 +13,7 @@
 
 ### UX e accessibilità
 
+- Immagini e PDF locali possono essere trascinati nella finestra: Qt acquisisce solo URL file locali, `WebBridge` applica la validazione canonica e il frontend riceve esclusivamente path già validati.
 - È possibile rimuovere singoli documenti dalla coda batch prima dell'avvio senza introdurre nuovo stato canonico o API backend.
 - Aggiunte scorciatoie `Ctrl+O`, `Ctrl+Enter` e `Ctrl+Shift+C`, delegate ai controlli esistenti e accompagnate da `aria-keyshortcuts`/tooltip.
 - Le operazioni OCR, batch e model lifecycle espongono `aria-busy`; i progressbar pubblicano un `aria-valuetext` significativo.
@@ -21,6 +22,7 @@
 
 ### Bug corretti
 
+- Il lifecycle asincrono del modello rilascia ora l'ownership del worker prima di pubblicare `idle`, eliminando la race che poteva rifiutare un reload immediato dopo unload/load completato.
 - Completato il forwarding EventBus -> Qt per gli eventi di completamento/fallimento di model lifecycle, hardware e operazioni accodate, evitando UI stale dopo eventi core corretti.
 - Il salvataggio PDF multipagina effettua rollback dei file pubblicati dalla stessa richiesta se una pagina successiva fallisce.
 - `ProcessManager` pubblica `batch_started` prima di rendere eseguibile il worker, eliminando la race con `batch_task_completed` e lo snapshot delle opzioni di output.

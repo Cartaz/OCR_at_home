@@ -323,6 +323,16 @@ class AppController:
             self._finish_operation(OP_MODEL_LOADING)
             raise
 
+    def _perform_model_load(self, device: str, token: CancellationToken) -> None:
+        self._engine.initialize(device=device, cancel_token=token)
+        token.raise_if_cancelled()
+
+    def _release_model_worker(self) -> None:
+        """Release async model-worker ownership before publishing idle state."""
+        with self._model_thread_lock:
+            if self._model_thread is threading.current_thread():
+                self._model_thread = None
+
     def _start_model_load_worker(self, device: str) -> None:
         with self._model_thread_lock:
             if self._shutdown_started:
@@ -331,8 +341,12 @@ class AppController:
                 raise OperationBusyError(OP_MODEL_LOADING)
 
             def load() -> None:
+                succeeded = False
+                with self._operation_lock:
+                    token = self._model_load_token
+                assert token is not None
                 try:
-                    self.load_model_sync(device)
+                    self._perform_model_load(device, token)
                     EventBus.emit(
                         "model_loaded",
                         {
@@ -340,7 +354,7 @@ class AppController:
                             "backend": self.model_backend,
                         },
                     )
-                    self._resume_pending_user_operation()
+                    succeeded = True
                 except OperationCancelledError:
                     self._clear_pending_user_operation()
                     EventBus.emit("model_load_cancelled", {"device": device})
@@ -352,9 +366,13 @@ class AppController:
                         {"device": device, "error": str(exc)},
                     )
                 finally:
-                    with self._model_thread_lock:
-                        if self._model_thread is threading.current_thread():
-                            self._model_thread = None
+                    with self._operation_lock:
+                        if self._model_load_token is token:
+                            self._model_load_token = None
+                    self._release_model_worker()
+                    self._finish_operation(OP_MODEL_LOADING)
+                if succeeded:
+                    self._resume_pending_user_operation()
 
             thread = threading.Thread(
                 target=load,
@@ -386,8 +404,7 @@ class AppController:
 
         assert token is not None
         try:
-            self._engine.initialize(device=device, cancel_token=token)
-            token.raise_if_cancelled()
+            self._perform_model_load(device, token)
         finally:
             with self._operation_lock:
                 if self._model_load_token is token:
@@ -414,6 +431,9 @@ class AppController:
             raise
         return True
 
+    def _perform_model_unload(self) -> None:
+        self._engine.shutdown()
+
     def _start_model_unload_worker(self) -> None:
         with self._model_thread_lock:
             if self._shutdown_started:
@@ -423,14 +443,20 @@ class AppController:
 
             def unload() -> None:
                 try:
-                    self.unload_model_sync()
+                    self._perform_model_unload()
+                    EventBus.emit(
+                        "model_unloaded",
+                        {
+                            "device": self._settings.default_device,
+                            "reason": "requested",
+                        },
+                    )
                 except Exception as exc:
                     logger.exception("Scaricamento modello fallito")
                     EventBus.emit("model_unload_failed", {"error": str(exc)})
                 finally:
-                    with self._model_thread_lock:
-                        if self._model_thread is threading.current_thread():
-                            self._model_thread = None
+                    self._release_model_worker()
+                    self._finish_operation(OP_MODEL_UNLOADING)
 
             thread = threading.Thread(
                 target=unload,
@@ -449,7 +475,7 @@ class AppController:
             raise OperationBusyError(active)
 
         try:
-            self._engine.shutdown()
+            self._perform_model_unload()
             EventBus.emit(
                 "model_unloaded",
                 {"device": self._settings.default_device, "reason": "requested"},

@@ -170,6 +170,39 @@ class WebBridge(QObject):
             )
         return path.resolve()
 
+    def accept_dropped_paths(self, raw_paths: list[str]) -> None:
+        """Validate native local-file drops and publish one atomic UI event."""
+        if self._shutdown:
+            return
+        if self._controller.operation != OP_IDLE:
+            self._error("Attendi la conclusione dell'operazione prima di cambiare file.")
+            return
+        if not raw_paths:
+            return
+        if len(raw_paths) > AppMeta.MAX_BATCH_SIZE:
+            self._error(f"Massimo {AppMeta.MAX_BATCH_SIZE} file per batch.")
+            return
+        try:
+            validated: list[str] = []
+            seen: set[str] = set()
+            for raw_path in raw_paths:
+                path = str(self._validate_path(str(raw_path)))
+                if path not in seen:
+                    seen.add(path)
+                    validated.append(path)
+            if not validated:
+                return
+            self._publish(
+                "files_dropped",
+                {
+                    "paths": validated,
+                    "names": [Path(path).name for path in validated],
+                },
+            )
+        except Exception as exc:
+            logger.warning("Drop file rifiutato: %s", exc)
+            self._error("File trascinato non valido.", details=str(exc))
+
     @Slot(result=str)
     def chooseSingleFile(self) -> str:
         path, _ = QFileDialog.getOpenFileName(

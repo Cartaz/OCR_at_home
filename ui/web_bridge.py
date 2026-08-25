@@ -20,6 +20,7 @@ from core.app_controller import (
     OP_OCR,
     AppController,
 )
+from core.log_reader import read_log_tail
 from ui.event_bridge import EventBridge
 
 logger = logging.getLogger(__name__)
@@ -350,13 +351,7 @@ class WebBridge(QObject):
     def getLogs(self, max_lines: int = 400) -> str:
         max_lines = max(20, min(int(max_lines), 2000))
         try:
-            if not AppMeta.LOG_PATH.exists():
-                return ""
-            lines = AppMeta.LOG_PATH.read_text(
-                encoding="utf-8",
-                errors="replace",
-            ).splitlines()
-            return "\n".join(lines[-max_lines:])
+            return read_log_tail(AppMeta.LOG_PATH, max_lines)
         except OSError as exc:
             return f"Impossibile leggere il log: {exc}"
 

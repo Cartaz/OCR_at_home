@@ -6,6 +6,7 @@ import atexit
 import logging
 import signal
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
@@ -32,7 +33,12 @@ def setup_logging() -> None:
         datefmt="%H:%M:%S",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(AppMeta.LOG_PATH, encoding="utf-8"),
+            RotatingFileHandler(
+                AppMeta.LOG_PATH,
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            ),
         ],
     )
 

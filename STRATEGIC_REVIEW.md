@@ -119,6 +119,28 @@ The remaining settings normalization in `WebBridge.updateSettings()` is not curr
 
 No further architectural migration is justified solely by the current strategic review. Before changing more structure, perform targeted bug hunting for concrete correctness, race, shutdown or error-path issues. Treat any new friction as a design signal, but do not refactor the settings/EventBus/accessor deferrals without evidence.
 
+## 2026-08-25 — Post-cleanup bug-hunting review
+
+### Concrete bugs found and resolved
+
+1. **Lifecycle events could disappear before reaching the UI.** `EventBridge` was not subscribed to several completion/failure events already consumed by `WebBridge`/JavaScript, including model load results and backend/hardware failures. PR #28 completed the existing EventBus→Qt contract and added behavioral forwarding coverage.
+2. **Failed multipage saves could leave silent partial output sets.** `write_ocr_pages()` published pages independently. PR #29 now rolls back only the files created by the current invocation if a later page fails, fsyncs the directory after rollback, and surfaces rollback failure explicitly. Collision-safe pre-existing files remain untouched.
+3. **Batch result events could race ahead of `batch_started`.** `ProcessManager` previously submitted its worker before emitting the start event. A fast worker could therefore produce task/completion events before `OutputWorkflow` froze batch output settings. PR #30 now reserves the job, publishes `batch_started`, then makes the worker executable; submit and Future registration remain protected together, and submit failure closes the lifecycle with `batch_failed`. A deliberately eager executor test reproduces the historical race deterministically.
+
+All three fixes stayed inside the modules that already owned the affected responsibility; no new manager, event system, worker framework or compatibility layer was introduced. Their full GitHub Actions validations passed Python compilation, package/shell syntax and the complete test suite.
+
+### Remaining shutdown limitation
+
+`ProcessManager.shutdown()` cancels the active token and waits for the single batch worker. The normal llama-server HTTP path is actively cancellable because the token closes the socket, and the HTTP connection also has a finite timeout. However, a pathological native/local operation inside image/PDF loading, rendering or preprocessing could theoretically block Python execution beyond that cancellation point. A thread timeout would not make engine destruction safe and would only create a false bounded-shutdown guarantee while the worker could still access the engine.
+
+This is therefore an explicit operational limitation, not a deferred one-line fix. If real hangs are observed in those native stages, the correct design response is process isolation (or another genuinely interruptible execution boundary) for the affected heavy work, with deterministic child-process termination. Do not add a timeout that abandons a live thread and then destroys shared OCR resources.
+
+### Strategic assessment after bug hunting
+
+The bug hunt validated the current ownership model rather than exposing a need for another architecture. The failures were local contract/order problems: incomplete event forwarding, non-transactional logical page publication, and worker activation occurring before lifecycle publication. Each was fixed by strengthening the existing owner and adding deterministic regression coverage.
+
+No current evidence justifies replacing EventBus, moving tiny settings writes to worker infrastructure, or removing compatibility accessors. Future structural work should continue to be driven by an observed failure, change amplification or ownership leak rather than by cleanup for its own sake.
+
 ### Design direction
 
 Do not replace the existing architecture wholesale. Keep `AppController`, `OCREngine`, `ProcessManager`, QWebChannel and the current EventBus unless a concrete refactor proves they are the source of the problem. Prefer deeper modules with narrow interfaces over additional indirection, factories, dependency-injection infrastructure or a frontend framework.

@@ -68,12 +68,38 @@ class ProcessManager:
             self._jobs[job.job_id] = job
             self._tokens[job.job_id] = token
             self._active_job_id = job.job_id
-            future = self._executor.submit(
-                self._execute_batch, job, token, preprocessing_enabled
-            )
-            self._futures[job.job_id] = future
 
-        EventBus.emit("batch_started", {"job_id": job.job_id, "total_tasks": job.total_count})
+        # Subscribers such as OutputWorkflow must freeze batch policy before the
+        # worker is allowed to emit task/completion events.
+        EventBus.emit(
+            "batch_started",
+            {"job_id": job.job_id, "total_tasks": job.total_count},
+        )
+
+        try:
+            # Keep submit + Future registration under the same lock. A real
+            # worker may run immediately, but its final cleanup cannot race the
+            # registration and leave a completed Future stranded in _futures.
+            with self._lock:
+                if self._shutting_down:
+                    raise BatchProcessingError(job.job_id, "ProcessManager in arresto")
+                future = self._executor.submit(
+                    self._execute_batch, job, token, preprocessing_enabled
+                )
+                self._futures[job.job_id] = future
+        except Exception as exc:
+            with self._lock:
+                if self._active_job_id == job.job_id:
+                    self._active_job_id = None
+                self._tokens.pop(job.job_id, None)
+                self._futures.pop(job.job_id, None)
+            job.status = JobStatus.FAILED
+            EventBus.emit(
+                "batch_failed",
+                {"job_id": job.job_id, "error": str(exc)},
+            )
+            raise
+
         return job
 
     def cancel_batch(self, job_id: str) -> None:

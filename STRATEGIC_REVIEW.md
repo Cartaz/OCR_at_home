@@ -51,17 +51,46 @@ The cleanup reduced rather than moved complexity. Output policy has one owner (`
 
 No new framework, event bus, dependency-injection layer or speculative abstraction was introduced. The controller became deeper because it now hides lifecycle coordination that presentation code previously had to understand; this is intentional information hiding rather than layer growth.
 
-#### Remaining important findings
+#### Remaining important findings at that milestone
 
-1. **GUI-thread hardware probing — next priority.** `WebBridge.refreshHardware()` still performs `get_available_devices(refresh=True)` synchronously in a QWebChannel slot. The detector may launch `llama-server --list-devices`, version/help probes and `lspci`, so refresh can freeze Qt for seconds. Backend initialization is also scheduled by a bridge-owned `_init_thread`. Target: controller-owned asynchronous hardware initialization/refresh with events; bridge only requests the action and serializes state.
-2. **GUI-thread filesystem I/O.** Manual OCR save actions still call durable output writers synchronously through a QWebChannel slot, including `fsync` and potentially many PDF page files. `getLogs()` also reads the whole log file synchronously and the frontend polls it. Target: move potentially slow output/log work behind focused Python services/workers without adding bridge-owned worker policy.
-3. **Frontend monkey-patching.** `save_ui.js` and `model_ui.js` still replace globals such as `applySettings`, `callNative`, `handleEvent`, `updateOperationUi` and `updateBackendPanel`. This creates script-order dependencies and obscures call flow. Target: explicit vanilla-JS registration/hooks or ES modules; no framework and no build step.
-4. **Base/subclass bridge duplication.** `WebBridge` still contains base implementations of OCR/batch/settings actions that `AppWebBridge` overrides. Once asynchronous hardware ownership is moved down, review whether one bridge with focused helpers is clearer than the current inheritance boundary.
-5. **Global EventBus.** It remains an implicit dependency across core modules. It is deliberately deferred because current ownership refactors do not require replacing it and a broad event-system migration would be disproportionate. Reassess only if it materially obstructs the next changes.
+1. **GUI-thread hardware probing.** `WebBridge.refreshHardware()` still performed `get_available_devices(refresh=True)` synchronously in a QWebChannel slot and backend initialization used a bridge-owned worker.
+2. **GUI-thread filesystem I/O.** Manual OCR save actions still called durable output writers synchronously through QWebChannel, while log polling read the whole file.
+3. **Frontend monkey-patching.** `save_ui.js` and `model_ui.js` replaced shared global functions and depended on script ordering.
+4. **Base/subclass bridge duplication.** `WebBridge` contained implementations overridden by `AppWebBridge`.
+5. **Global EventBus.** It remained an implicit dependency and was deliberately deferred because replacing it was disproportionate to the concrete problems being solved.
 
 #### Decision before next milestone
 
-Resolve GUI-thread hardware probing before feature work. It is a correctness/responsiveness issue and also enables removal of the remaining bridge-owned initialization thread. After that, address synchronous output/log I/O, then remove frontend monkey-patching. EventBus replacement remains deferred with explicit justification.
+Resolve hardware probing first, then bounded log/output I/O and frontend monkey-patching. EventBus replacement remains deferred unless it becomes a concrete obstacle.
+
+## 2026-08-25 — Post responsiveness/ownership milestone review
+
+### What is now resolved
+
+- Hardware initialization and manual refresh run through one controller-owned hardware worker lane. `WebBridge` no longer owns an initialization thread and QWebChannel does not execute detector subprocess probes directly.
+- Application logs rotate at a bounded size and the UI reads only a bounded tail rather than the full historical file on every poll.
+- `app.js` exposes explicit vanilla-JS extension hooks; `save_ui.js` and `model_ui.js` no longer monkey-patch shared functions, and save readiness no longer depends on `MutationObserver` inference.
+- Manual OCR persistence is asynchronous from the GUI perspective. `OutputWorkflow` owns exactly one manual-output worker, snapshots the canonical result/settings before dispatch, and emits completion/failure events. QWebChannel save slots return a request id immediately and never perform durable output writes themselves.
+- Manual-output shutdown is bounded and deterministic; a second manual save is rejected while the owned worker is alive.
+- The final PR validation for this sequence passed Python compilation, package/shell syntax and the complete test suite: 165 tests green, including deliberately blocked hardware/output workers and WebEngine/UI smoke coverage.
+
+### Strategic assessment
+
+Complexity decreased in the presentation layer and moved downward only where the lower module is the natural owner. The new asynchronous paths do not introduce a generic worker framework, task queue, dependency-injection system or second event bus. Hardware lifecycle stays with `AppController`; durable result state and persistence stay with `OutputWorkflow`; filesystem publication stays with `output_writer`; Qt/JavaScript only request actions and display events.
+
+The most important mutable states now have clear owners: operation/model/hardware coordination in `AppController`, batch processing in `ProcessManager`, model backend lifecycle in `OCREngine`/`LlamaServerBackend`, completed OCR/output policy in `OutputWorkflow`, and presentation-only state in JavaScript. The refactors therefore reduce hidden dependencies and change amplification rather than merely relocating code.
+
+### Remaining findings and explicit deferrals
+
+1. **Bridge inheritance/duplication — next architectural cleanup candidate.** `WebBridge` still defines OCR/batch/settings slots that `AppWebBridge` overrides. This is understandable today but creates two apparent implementations for some public QWebChannel actions. Review whether collapsing to one bridge or extracting focused validation helpers makes the interface shallower without changing behavior.
+2. **Small settings writes still occur synchronously from presentation calls.** `updateSettings()` and debounced window-size persistence eventually call the small settings abstraction synchronously. These writes are bounded local configuration I/O and are not currently observed as a responsiveness problem, unlike hardware probes or OCR output `fsync`. Defer worker machinery unless measurement or a concrete failure justifies it.
+3. **Path validation performs local metadata I/O in the bridge.** `Path.is_file()`, suffix checks and `stat()` are intentionally retained at the input boundary. They are small validation operations; moving them to a worker would complicate native file-selection flow without current evidence of benefit.
+4. **Global EventBus remains implicit infrastructure.** It now cleanly carries core events to `EventBridge` and `OutputWorkflow`, and current ownership is understandable. Replacing it would be a broad migration with no demonstrated payoff; defer until a concrete dependency or testing problem appears.
+5. **Compatibility accessors on `AppController`.** Direct `engine` and `process_manager` properties remain for tests/integrations even though presentation code now uses focused APIs. Keep them for compatibility unless their presence starts encouraging layer leakage.
+
+### Decision before further feature work
+
+Review the `WebBridge`/`AppWebBridge` inheritance boundary next because it is the clearest remaining source of duplicated public behavior and cognitive load. Do not introduce asynchronous infrastructure for tiny settings/path metadata operations without evidence. Keep the EventBus unless a concrete next change demonstrates that it is the source of complexity.
 
 ### Design direction
 

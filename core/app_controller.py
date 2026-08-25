@@ -20,6 +20,7 @@ from core.exceptions import (
 from core.hardware_detector import HardwareDetector
 from core.models import BatchOCRJob, HardwareInfo, OCRResult
 from core.ocr_engine import OCREngine
+from core.output_workflow import OutputWorkflow
 from core.process_manager import ProcessManager
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ class _OCRWorker:
 
 
 class AppController:
-    """Coordina model loading, OCR, batch, unload e shutdown come operazioni esclusive."""
+    """Coordina model loading, OCR, batch, output e shutdown."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -118,6 +119,7 @@ class AppController:
         self._ocr_thread: threading.Thread | None = None
         self._ocr_token: CancellationToken | None = None
         self._model_load_token: CancellationToken | None = None
+        self._output_workflow = OutputWorkflow(lambda: self._settings)
         self._process_manager = ProcessManager(
             self._engine,
             on_job_finished=self._on_batch_finished,
@@ -405,6 +407,14 @@ class AppController:
         self._settings.save()
         EventBus.emit("config_changed", overrides)
 
+    def save_single_result(self, source_path: str, file_format: str) -> Path:
+        """Persist the canonical completed single-OCR result."""
+        return self._output_workflow.save_single_result(source_path, file_format)
+
+    def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
+        """Persist canonical page texts from a completed single-PDF OCR."""
+        return self._output_workflow.save_single_pdf_pages(source_path, file_format)
+
     def shutdown(self) -> None:
         """Cancella le operazioni, attende i worker e rilascia il backend."""
         with self._operation_lock:
@@ -428,6 +438,7 @@ class AppController:
         if ocr_thread is not None and ocr_thread.is_alive():
             ocr_thread.join(timeout=15)
 
+        self._output_workflow.shutdown()
         self._engine.shutdown()
         self._initialized = False
 

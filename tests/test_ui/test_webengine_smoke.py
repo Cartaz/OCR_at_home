@@ -137,6 +137,7 @@ def test_batch_items_can_be_removed_only_before_start() -> None:
     app, window = _load_window()
     script = """
         (() => {
+            state.devices = [{available: true, device_name: 'SYCL'}];
             state.modelReady = true;
             state.operation = 'idle';
             state.batchPaths = ['/tmp/one.png', '/tmp/two.pdf'];

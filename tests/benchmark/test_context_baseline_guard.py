@@ -1,4 +1,4 @@
-"""Regression tests for the benchmark context-baseline guard."""
+"""Regression tests for the canonical real-world benchmark baseline guards."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from tests.benchmark.runtime_backend import (
 )
 
 
-def test_realworld_baseline_uses_8192_context_without_removing_smaller_candidates() -> None:
+def test_realworld_baseline_uses_16384_context_without_removing_smaller_candidates() -> None:
     baseline = production_runtime_config()
-    assert baseline.context_size == 8192
+    assert baseline.context_size == 16384
 
     capabilities = RuntimeCapabilities(
         server_path="/tmp/llama-server",
@@ -25,15 +25,17 @@ def test_realworld_baseline_uses_8192_context_without_removing_smaller_candidate
         4096,
         6144,
         8192,
+        12288,
+        16384,
     ]
 
-    # The generic runtime profile is still neutral; only the canonical
+    # The generic runtime profile remains neutral; only the canonical
     # production-like benchmark baseline receives the larger safety budget.
     assert ServerRuntimeConfig().context_size == 4096
 
 
-def test_canonical_entrypoint_invalidates_pre_context_guard_checkpoints() -> None:
+def test_canonical_entrypoint_invalidates_pre_current_baseline_checkpoints() -> None:
     from tests.benchmark import run_realworld_suite  # noqa: F401
     from tests.benchmark import run_realworld_suite_v2 as runner
 
-    assert runner.CHECKPOINT_SCHEMA == 3
+    assert runner.CHECKPOINT_SCHEMA == 5

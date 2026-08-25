@@ -92,6 +92,33 @@ The most important mutable states now have clear owners: operation/model/hardwar
 
 Review the `WebBridge`/`AppWebBridge` inheritance boundary next because it is the clearest remaining source of duplicated public behavior and cognitive load. Do not introduce asynchronous infrastructure for tiny settings/path metadata operations without evidence. Keep the EventBus unless a concrete next change demonstrates that it is the source of complexity.
 
+## 2026-08-25 — Post single-bridge milestone review
+
+### What is now resolved
+
+- `AppWebBridge` has been removed completely; there is one concrete `WebBridge` and one implementation for every QWebChannel slot.
+- `main.py`, model-memory tests and output-workflow bridge tests all instantiate the same bridge type.
+- The Qt idle timer moved into `WebBridge` as a native scheduling concern only; the auto-unload decision remains in `AppController`.
+- The merged bridge still contains no domain algorithms, output writers, model/hardware workers or persistent operational state. Its responsibilities are limited to input validation/conversion, serialization, native dialogs/clipboard/window integration, Qt scheduling and delegation.
+- PR #27 reduced the presentation layer overall (`+110/-206` across the reviewable change) and its GitHub Actions run passed Python compilation, package/shell syntax and the complete unit/UI suite.
+
+### Strategic assessment
+
+Collapsing the inheritance boundary reduced cognitive load without moving business logic upward. The previous subclass no longer represented a distinct abstraction: it existed mainly to override public slots already present on the base class. A single adapter therefore has a larger source file but a substantially simpler public mental model: one QWebChannel object, one implementation path, one shutdown path.
+
+The remaining settings normalization in `WebBridge.updateSettings()` is not currently considered accidental duplication with `Settings.load()`. The two paths serve different abstraction levels: the bridge validates/converts untrusted UI inputs before delegation, while `Settings.load()` repairs/migrates persisted configuration. Moving all bridge validation into `Settings` would blur that distinction and would not currently reduce change amplification enough to justify another abstraction.
+
+### Remaining explicit deferrals
+
+1. **Small settings writes on the Qt thread.** Persisting the compact local JSON settings file remains synchronous. This is intentionally deferred because no measurable responsiveness problem has been observed and adding a settings worker would increase lifecycle/concurrency surface area.
+2. **Local path metadata validation.** `is_file()`/`stat()` remain in the bridge input boundary. They are bounded validation operations and currently fit the bridge contract.
+3. **Global EventBus.** It remains implicit infrastructure but is no longer obstructing ownership or testing. Replacing it now would be speculative architecture.
+4. **Compatibility accessors on `AppController`.** Direct `engine`/`process_manager` properties remain for tests/integrations. Production presentation code uses focused APIs, so removal is deferred until there is a concrete compatibility decision.
+
+### Decision before further cleanup
+
+No further architectural migration is justified solely by the current strategic review. Before changing more structure, perform targeted bug hunting for concrete correctness, race, shutdown or error-path issues. Treat any new friction as a design signal, but do not refactor the settings/EventBus/accessor deferrals without evidence.
+
 ### Design direction
 
-Do not replace the existing architecture wholesale. Keep `AppController`, `OCREngine`, `ProcessManager`, QWebChannel and the current EventBus unless a concrete refactor proves they are the source of the problem. Prefer two or three deeper modules with narrow interfaces over additional indirection, factories, dependency-injection infrastructure or a frontend framework.
+Do not replace the existing architecture wholesale. Keep `AppController`, `OCREngine`, `ProcessManager`, QWebChannel and the current EventBus unless a concrete refactor proves they are the source of the problem. Prefer deeper modules with narrow interfaces over additional indirection, factories, dependency-injection infrastructure or a frontend framework.

@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased] — 2026-08-25
+
+### Architettura e affidabilità
+
+- La UI desktop è ora basata su PySide6/Qt WebEngine con frontend locale HTML/CSS/JavaScript e un solo `WebBridge` QWebChannel.
+- La policy del benchmark real-world è esplicita e non modifica più moduli importati tramite monkey-patching.
+- `AppController` possiede lifecycle modello, probing hardware asincrono e coordinamento delle operazioni; `OutputWorkflow` possiede risultato OCR canonico e persistenza.
+- Il frontend usa hook espliciti invece di monkey-patching di funzioni globali e non reinvia più il testo OCR visualizzato a Python come fonte di persistenza.
+- I salvataggi manuali sono asincroni rispetto al thread Qt; log rotation e tail bounded impediscono crescita non limitata del costo di polling.
+- `WebEngine` blocca la navigazione remota interna e delega HTTP/HTTPS al browser di sistema.
+
+### Bug corretti
+
+- Completato il forwarding EventBus -> Qt per gli eventi di completamento/fallimento di model lifecycle, hardware e operazioni accodate, evitando UI stale dopo eventi core corretti.
+- Il salvataggio PDF multipagina effettua rollback dei file pubblicati dalla stessa richiesta se una pagina successiva fallisce.
+- `ProcessManager` pubblica `batch_started` prima di rendere eseguibile il worker, eliminando la race con `batch_task_completed` e lo snapshot delle opzioni di output.
+- `Settings.save()` pubblica ora il JSON con sostituzione atomica, preservando l'ultima configurazione valida in caso di errore durante la scrittura.
+- L'inizializzazione startup resta retryable se il worker di caricamento modello non riesce ad avviarsi al primo tentativo.
+
+### Benchmark e test
+
+- Aggiunto il protocollo real-world benchmark v2 con corpus FACILE/MEDIO/DIFFICILE, scoring separato MAIUSCOLO/SCRIPT/CORSIVO, quality gates, Stage A e Stage B beam search.
+- Rafforzati i test deterministici per concorrenza, cancellation, process lifecycle, output atomico, WebEngine e failure path.
+- La validazione canonica è `python -m compileall -q main.py config core ui tests` seguita da `python -m pytest`.
+
+### Installazione e manutenzione
+
+- `install.sh` richiede Python 3.12+, verifica import Python/Qt critici e mantiene il runtime `llama-server` SYCL pinato a una revisione nota.
+- Aggiunti `README.md`, strategic milestone reviews persistenti e log rotation.
+- Le dipendenze Python runtime mantengono minimi testati e limiti di major version; le dipendenze di test sono separate in `requirements-dev.txt`, senza introdurre `pyproject.toml` o lockfile.
+
 ## [1.0.1] — 2026-07-03 — Pulizia e bug fix
 
 ### Bug critici corretti

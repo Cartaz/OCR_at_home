@@ -13,6 +13,7 @@
 
 ### UX e accessibilità
 
+- Immagini e PDF locali possono essere trascinati nella finestra: Qt acquisisce solo URL file locali, `WebBridge` applica la validazione canonica e il frontend riceve esclusivamente path già validati.
 - È possibile rimuovere singoli documenti dalla coda batch prima dell'avvio senza introdurre nuovo stato canonico o API backend.
 - Aggiunte scorciatoie `Ctrl+O`, `Ctrl+Enter` e `Ctrl+Shift+C`, delegate ai controlli esistenti e accompagnate da `aria-keyshortcuts`/tooltip.
 - Le operazioni OCR, batch e model lifecycle espongono `aria-busy`; i progressbar pubblicano un `aria-valuetext` significativo.

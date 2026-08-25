@@ -126,8 +126,10 @@ No further architectural migration is justified solely by the current strategic 
 1. **Lifecycle events could disappear before reaching the UI.** `EventBridge` was not subscribed to several completion/failure events already consumed by `WebBridge`/JavaScript, including model load results and backend/hardware failures. PR #28 completed the existing EventBus→Qt contract and added behavioral forwarding coverage.
 2. **Failed multipage saves could leave silent partial output sets.** `write_ocr_pages()` published pages independently. PR #29 now rolls back only the files created by the current invocation if a later page fails, fsyncs the directory after rollback, and surfaces rollback failure explicitly. Collision-safe pre-existing files remain untouched.
 3. **Batch result events could race ahead of `batch_started`.** `ProcessManager` previously submitted its worker before emitting the start event. A fast worker could therefore produce task/completion events before `OutputWorkflow` froze batch output settings. PR #30 now reserves the job, publishes `batch_started`, then makes the worker executable; submit and Future registration remain protected together, and submit failure closes the lifecycle with `batch_failed`. A deliberately eager executor test reproduces the historical race deterministically.
+4. **Settings publication could destroy the last valid configuration.** `Settings.save()` previously truncated the canonical JSON before the new state was durable. PR #31 now writes and fsyncs a same-directory temporary file, publishes it with atomic replacement, fsyncs the parent directory where supported, and preserves the previous settings file if publication fails.
+5. **A synchronous startup worker-start failure could make initialization permanently non-retryable.** `AppController.initialize()` marked itself initialized before the startup model worker was successfully launched. PR #32 now sets the initialization guard only after that request succeeds; a deterministic regression verifies that a failed first attempt returns to idle and a second attempt can initialize normally.
 
-All three fixes stayed inside the modules that already owned the affected responsibility; no new manager, event system, worker framework or compatibility layer was introduced. Their full GitHub Actions validations passed Python compilation, package/shell syntax and the complete test suite.
+All five fixes stayed inside the modules that already owned the affected responsibility; no new manager, event system, worker framework or compatibility layer was introduced. Their full GitHub Actions validations passed Python compilation, package/shell syntax and the complete test suite.
 
 ### Remaining shutdown limitation
 
@@ -137,9 +139,13 @@ This is therefore an explicit operational limitation, not a deferred one-line fi
 
 ### Strategic assessment after bug hunting
 
-The bug hunt validated the current ownership model rather than exposing a need for another architecture. The failures were local contract/order problems: incomplete event forwarding, non-transactional logical page publication, and worker activation occurring before lifecycle publication. Each was fixed by strengthening the existing owner and adding deterministic regression coverage.
+The bug hunt validated the current ownership model rather than exposing a need for another architecture. The failures were local contract/order/durability problems: incomplete event forwarding, non-transactional logical page publication, worker activation occurring before lifecycle publication, non-atomic settings replacement, and premature startup initialization state. Each was fixed by strengthening the existing owner and adding deterministic regression coverage.
 
-No current evidence justifies replacing EventBus, moving tiny settings writes to worker infrastructure, or removing compatibility accessors. Future structural work should continue to be driven by an observed failure, change amplification or ownership leak rather than by cleanup for its own sake.
+No current evidence justifies replacing EventBus, moving tiny settings writes to worker infrastructure, removing compatibility accessors, or introducing a generic retry/transaction framework. Future structural work should continue to be driven by an observed failure, change amplification or ownership leak rather than by cleanup for its own sake.
+
+### Decision after the bug-hunting cycle
+
+Stop structural cleanup here. The audited areas now have explicit ownership, deterministic tests for the observed races/failure paths, and no remaining local defect that warrants additional architecture. Resume feature/milestone work; repeat the strategic whole-project review at the next milestone boundary.
 
 ### Design direction
 

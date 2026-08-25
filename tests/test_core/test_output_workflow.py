@@ -82,6 +82,9 @@ def test_manual_save_request_returns_while_writer_is_blocked(
         assert writer_started.wait(timeout=1)
         assert not saved_event.is_set()
 
+        with pytest.raises(RuntimeError, match="già in corso"):
+            workflow.request_save_single_result(source, "md")
+
         writer_release.set()
         assert saved_event.wait(timeout=1)
         assert payloads[-1] == {

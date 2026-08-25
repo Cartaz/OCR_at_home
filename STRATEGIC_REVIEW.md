@@ -150,3 +150,33 @@ Stop structural cleanup here. The audited areas now have explicit ownership, det
 ### Design direction
 
 Do not replace the existing architecture wholesale. Keep `AppController`, `OCREngine`, `ProcessManager`, QWebChannel and the current EventBus unless a concrete refactor proves they are the source of the problem. Prefer deeper modules with narrow interfaces over additional indirection, factories, dependency-injection infrastructure or a frontend framework.
+
+## 2026-08-25 — Post Phase 7 daily-use UX milestone review
+
+### Complexity and ownership
+
+Phase 7 reduced user interaction cost without moving operational authority into JavaScript. Single/batch selection remains temporary presentation state; filesystem validation remains at the Python bridge boundary; drag-and-drop acquisition remains native Qt; clipboard persistence is isolated in the focused `InputStaging` core service. `main.py` remains wiring-only and no new persistent application state was added.
+
+The clipboard feature initially expanded the responsibility of `drop_ui.js`; the milestone review treated that naming mismatch as architectural drift rather than leaving it in place. The module was renamed to `input_ui.js`, where drag-and-drop and clipboard now share the same local-input selection transitions. This removes duplicated presentation behavior and gives future local input methods one obvious integration point.
+
+`InputStaging` is intentionally small but deep: callers provide PNG bytes and receive a local path, while session-directory creation, size enforcement, publication cleanup and idempotent shutdown remain hidden. JavaScript never receives raw clipboard bytes or arbitrary filesystem access. `WebBridge` performs only the Qt-specific `QImage`→PNG adaptation and delegates storage ownership downward.
+
+### Concurrency, lifecycle and failure paths
+
+Phase 7 introduced no new background worker or polling mechanism. Clipboard conversion/staging is bounded local work and is rejected while another user operation is active. Transient files are removed deterministically during bridge shutdown. Existing OCR/model/process cancellation ownership remains unchanged.
+
+The final drag/drop work also exposed a real model-lifecycle race: `operation` could become `idle` before the asynchronous model worker released ownership. That was fixed at the owner boundary in `AppController`, and a deterministic regression now asserts that every lifecycle transition to `idle` observes no owned model worker.
+
+### Tests and change amplification
+
+Behavioral coverage is split by responsibility: core tests exercise transient staging and cleanup; bridge tests exercise native clipboard conversion and busy rejection; native-shell tests exercise local URL filtering; real Qt WebEngine tests exercise drag/drop routing, clipboard routing, accessibility metadata and preservation of ordinary text paste. Tests therefore protect contracts rather than source-string accidents.
+
+Adding clipboard support did not require changes to OCR/domain algorithms, persistence/output workflow, model runtime, batch processing or `main.py`. The main cross-layer changes were the expected input boundary, presentation adapter/module and focused tests, indicating controlled change amplification.
+
+### Remaining explicit deferrals
+
+The previously recorded deferrals remain unchanged: tiny settings writes and local path metadata checks stay synchronous; EventBus remains because it is not currently a source of concrete complexity; compatibility accessors remain for tests/integrations. None became harder to reason about during Phase 7.
+
+### Decision after Phase 7
+
+Phase 7 is strategically complete. No additional abstraction or cleanup is justified before the next roadmap work. Continue with measured benchmark/quality work and repository maintenance, and repeat the whole-project strategic review at the next milestone boundary.

@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
@@ -20,6 +20,7 @@ from core.app_controller import (
     OP_OCR,
     AppController,
 )
+from core.input_staging import InputStaging
 from core.log_reader import read_log_tail
 from ui.event_bridge import EventBridge
 
@@ -36,10 +37,15 @@ class WebBridge(QObject):
         controller: AppController,
         window: QWidget | None = None,
         parent: QObject | None = None,
+        input_staging: InputStaging | None = None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
         self._window = window
+        self._input_staging = input_staging or InputStaging(
+            AppMeta.INPUT_CACHE_DIR,
+            max_bytes=AppMeta.MAX_IMAGE_SIZE_MB * 1024 * 1024,
+        )
         self._events = EventBridge(controller, parent=self)
         self._events.event_received.connect(self._on_core_event)
         self._devices_snapshot: list[dict[str, Any]] = []
@@ -202,6 +208,46 @@ class WebBridge(QObject):
         except Exception as exc:
             logger.warning("Drop file rifiutato: %s", exc)
             self._error("File trascinato non valido.", details=str(exc))
+
+    @Slot(result=str)
+    def pasteClipboardImage(self) -> str:
+        """Stage one native clipboard image as a validated local PNG input."""
+        if self._shutdown:
+            return self._json({"ok": False, "error": "Applicazione in arresto"})
+        if self._controller.operation != OP_IDLE:
+            return self._json(
+                {
+                    "ok": False,
+                    "error": "Attendi la conclusione dell'operazione prima di cambiare file.",
+                }
+            )
+        try:
+            image = QGuiApplication.clipboard().image()
+            if image.isNull():
+                raise ValueError("La clipboard non contiene un'immagine")
+
+            data = QByteArray()
+            buffer = QBuffer(data)
+            if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+                raise RuntimeError("Impossibile preparare l'immagine clipboard")
+            try:
+                if not image.save(buffer, "PNG"):
+                    raise RuntimeError("Impossibile convertire l'immagine clipboard in PNG")
+            finally:
+                buffer.close()
+
+            staged = self._input_staging.stage_png(bytes(data))
+            valid = self._validate_path(str(staged))
+            return self._json(
+                {
+                    "ok": True,
+                    "path": str(valid),
+                    "name": "Immagine dagli appunti.png",
+                }
+            )
+        except Exception as exc:
+            logger.warning("Immagine clipboard rifiutata: %s", exc)
+            return self._json({"ok": False, "error": str(exc)})
 
     @Slot(result=str)
     def chooseSingleFile(self) -> str:
@@ -493,6 +539,7 @@ class WebBridge(QObject):
         self._shutdown = True
         self._idle_timer.stop()
         self._events.shutdown(wait_ms=wait_ms)
+        self._input_staging.shutdown()
         try:
             self._controller.cancel_model_loading()
             self._controller.cancel_ocr()

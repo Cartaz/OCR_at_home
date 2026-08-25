@@ -200,7 +200,11 @@ Goal: improve speed of use without adding decorative complexity.
   - Drops are rejected outside `idle`; duplicate paths are removed without changing order.
   - One dropped file selects OCR, multiple files route to Batch, while a drop made from the Batch view remains a batch selection.
   - Native URL filtering, bridge validation/busy rejection and real Qt WebEngine routing are covered in CI.
-- [ ] Paste image from clipboard.
+- [x] Paste image from clipboard.
+  - Qt reads the native clipboard image and encodes it as PNG; JavaScript never receives raw clipboard bytes or filesystem authority.
+  - `InputStaging` owns a per-session transient directory under the XDG cache, enforces the input-size limit and removes its files deterministically at shutdown.
+  - `Ctrl+V` is handled only outside editable controls, preserving normal text paste in settings fields.
+  - Clipboard and drag/drop converge on the same `input_ui.js` selection transitions, with core, bridge and real Qt WebEngine coverage.
 - [x] Keyboard shortcuts (`Ctrl+O`, OCR start shortcut, copy result).
   - `Ctrl+O` opens the single-file picker, `Ctrl+Enter` starts OCR or batch according to the active view, and `Ctrl+Shift+C` copies the OCR result.
   - Shortcuts activate existing controls and therefore inherit disabled/busy rules; normal `Ctrl+C` remains untouched.

@@ -46,7 +46,7 @@
             if (type === "files_dropped") applyDroppedFiles(payload);
         },
         initialize() {
-            $("#single-file-button").title = "Scegli un file o trascinalo nella finestra";
+            $("#single-file-button").title = "Scegli file o trascinalo nella finestra (Ctrl+O)";
             $("#batch-file-button").title = "Scegli file o trascinali nella finestra";
             $("#single-file-display").setAttribute(
                 "aria-description",

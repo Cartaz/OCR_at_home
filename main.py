@@ -138,6 +138,7 @@ def main() -> None:
         window.setWindowIcon(icon)
 
     bridge = WebBridge(controller, window=window, parent=window)
+    window.files_dropped.connect(bridge.accept_dropped_paths)
     channel = QWebChannel(window.page())
     channel.registerObject("backend", bridge)
     window.page().setWebChannel(channel)

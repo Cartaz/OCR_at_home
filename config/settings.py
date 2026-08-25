@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -57,9 +59,41 @@ class Settings:
         return Settings(**current)
 
     def save(self) -> None:
-        AppMeta.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(AppMeta.SETTINGS_PATH, "w", encoding="utf-8") as file:
-            json.dump(asdict(self), file, indent=2, ensure_ascii=False)
+        """Durably replace settings without exposing a truncated final JSON file."""
+        directory = AppMeta.SETTINGS_PATH.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{AppMeta.SETTINGS_PATH.name}.",
+            suffix=".tmp",
+            dir=directory,
+            text=True,
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as file:
+                json.dump(asdict(self), file, indent=2, ensure_ascii=False)
+                file.write("\n")
+                file.flush()
+                os.fsync(file.fileno())
+
+            os.replace(temp_path, AppMeta.SETTINGS_PATH)
+            try:
+                dir_fd = os.open(directory, os.O_RDONLY)
+            except OSError:
+                dir_fd = -1
+            if dir_fd >= 0:
+                try:
+                    try:
+                        os.fsync(dir_fd)
+                    except OSError:
+                        pass
+                finally:
+                    os.close(dir_fd)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
         logger.info("Impostazioni salvate in %s", AppMeta.SETTINGS_PATH)
 
     @classmethod

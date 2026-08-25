@@ -160,7 +160,7 @@ def test_webengine_routes_validated_drops_by_active_view() -> None:
         ["batch", ["/tmp/only.pdf"], "1 file selezionato"],
         ["ocr", "/tmp/from-settings.png"],
         "Scegli file o trascinalo nella finestra (Ctrl+O)",
-        "Puoi anche trascinare un'immagine o un PDF nella finestra.",
+        "Puoi trascinare un'immagine o un PDF nella finestra oppure incollare un'immagine con Ctrl+V.",
     ]
     _close_window(window)
     _ = app

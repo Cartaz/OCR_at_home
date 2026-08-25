@@ -133,6 +133,57 @@ def test_model_memory_module_executes_in_real_webengine() -> None:
     _ = app
 
 
+def test_batch_items_can_be_removed_only_before_start() -> None:
+    app, window = _load_window()
+    script = """
+        (() => {
+            state.modelReady = true;
+            state.operation = 'idle';
+            state.batchPaths = ['/tmp/one.png', '/tmp/two.pdf'];
+            state.batchStates = new Map(state.batchPaths.map((path) => [path, 'In coda']));
+            state.batchResults = new Map([
+                ['/tmp/one.png', {ok: true, text: 'old'}]
+            ]);
+            renderBatchFiles();
+            renderBatchResults();
+            updateOperationUi();
+
+            const before = document.querySelectorAll('.batch-remove-button').length;
+            document.querySelector('.batch-remove-button').click();
+            const afterRemoval = [
+                [...state.batchPaths],
+                state.batchStates.has('/tmp/one.png'),
+                state.batchResults.has('/tmp/one.png'),
+                document.querySelector('#batch-count-label').textContent,
+                document.querySelector('#batch-start-button').disabled,
+                document.querySelectorAll('.batch-remove-button').length
+            ];
+
+            state.operation = 'batch';
+            updateOperationUi();
+            const remove = document.querySelector('.batch-remove-button');
+            const disabledDuringBatch = remove.disabled;
+            remove.click();
+
+            return JSON.stringify([
+                before,
+                afterRemoval,
+                disabledDuringBatch,
+                [...state.batchPaths]
+            ]);
+        })();
+    """
+
+    assert _run_json_script(window, script) == [
+        2,
+        [["/tmp/two.pdf"], False, False, "1 file selezionato", False, 1],
+        True,
+        ["/tmp/two.pdf"],
+    ]
+    _close_window(window)
+    _ = app
+
+
 def test_safe_controls_remain_available_during_model_load() -> None:
     script = (ROOT / "ui" / "web" / "app.js").read_text(encoding="utf-8")
     assert '$("#single-file-button").disabled = busy' in script

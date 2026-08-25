@@ -89,6 +89,20 @@ class FakeDetector:
         return self.devices[0]
 
 
+class BlockingDetector(FakeDetector):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.refresh_values: list[bool] = []
+
+    def detect(self, *, refresh: bool = False):
+        self.refresh_values.append(refresh)
+        self.started.set()
+        assert self.release.wait(timeout=2), "test detector was never released"
+        return list(self.devices)
+
+
 class FakeUnavailableDetector:
     def __init__(self) -> None:
         self.devices = [
@@ -167,6 +181,44 @@ def test_cancelled_async_model_load_releases_operation(monkeypatch) -> None:
     assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.initialize_calls == ["llama-cpp-sycl"]
     assert engine.is_initialized is False
+    controller.shutdown()
+
+
+def test_request_initialize_returns_while_hardware_probe_is_running(monkeypatch) -> None:
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+    controller = AppController(
+        Settings(default_device="llama-cpp", load_model_at_startup=False)
+    )
+    detector = BlockingDetector()
+    controller._hardware_detector = detector  # type: ignore[attr-defined]
+
+    assert controller.request_initialize() is True
+    assert detector.started.wait(timeout=1)
+    hardware_thread = controller._hardware_thread  # type: ignore[attr-defined]
+    assert hardware_thread is not None and hardware_thread.is_alive()
+    assert controller._initialized is False  # type: ignore[attr-defined]
+
+    detector.release.set()
+    assert _wait_until(lambda: controller._initialized)  # type: ignore[attr-defined]
+    assert _wait_until(lambda: controller._hardware_thread is None)  # type: ignore[attr-defined]
+    assert detector.refresh_values == [False]
+    controller.shutdown()
+
+
+def test_request_hardware_refresh_returns_while_probe_is_running(monkeypatch) -> None:
+    controller, _engine = _controller_with_fake_engine(monkeypatch)
+    detector = BlockingDetector()
+    controller._hardware_detector = detector  # type: ignore[attr-defined]
+
+    assert controller.request_hardware_refresh() is True
+    assert detector.started.wait(timeout=1)
+    hardware_thread = controller._hardware_thread  # type: ignore[attr-defined]
+    assert hardware_thread is not None and hardware_thread.is_alive()
+    assert controller.request_hardware_refresh() is False
+
+    detector.release.set()
+    assert _wait_until(lambda: controller._hardware_thread is None)  # type: ignore[attr-defined]
+    assert detector.refresh_values == [True]
     controller.shutdown()
 
 

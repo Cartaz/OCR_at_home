@@ -117,7 +117,7 @@ class _OCRWorker:
 
 
 class AppController:
-    """Own application operations, model lifecycle and canonical services."""
+    """Own application operations, hardware/model lifecycle and canonical services."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -128,6 +128,9 @@ class AppController:
         self._initialized = False
         self._shutdown_started = False
         self._idle_since = time.monotonic()
+
+        self._hardware_thread: threading.Thread | None = None
+        self._hardware_thread_lock = threading.Lock()
 
         self._ocr_thread: threading.Thread | None = None
         self._ocr_token: CancellationToken | None = None
@@ -216,6 +219,64 @@ class AppController:
             self._model_load_token = token
         EventBus.emit("model_loading", {"device": device})
         return token
+
+    def _start_hardware_worker(
+        self,
+        *,
+        name: str,
+        task: Callable[[], None],
+        failure_event: str,
+    ) -> bool:
+        """Run one hardware probe outside Qt; hardware work has one controller owner."""
+        with self._hardware_thread_lock:
+            if self._shutdown_started:
+                raise OperationBusyError(OP_SHUTTING_DOWN)
+            if self._hardware_thread is not None and self._hardware_thread.is_alive():
+                return False
+
+            def run() -> None:
+                try:
+                    task()
+                except Exception as exc:
+                    logger.exception("Hardware worker %s fallito", name)
+                    if not self._shutdown_started:
+                        EventBus.emit(failure_event, {"error": str(exc)})
+                finally:
+                    with self._hardware_thread_lock:
+                        if self._hardware_thread is threading.current_thread():
+                            self._hardware_thread = None
+
+            thread = threading.Thread(target=run, name=name, daemon=True)
+            self._hardware_thread = thread
+            thread.start()
+            return True
+
+    def request_initialize(self) -> bool:
+        """Initialize hardware/model policy asynchronously; safe for the Qt bridge."""
+        if self._initialized:
+            return False
+        return self._start_hardware_worker(
+            name="backend-init-worker",
+            task=self.initialize,
+            failure_event="backend_initialization_failed",
+        )
+
+    def request_hardware_refresh(self) -> bool:
+        """Refresh hardware asynchronously without blocking the GUI thread."""
+        if self.operation != OP_IDLE:
+            raise OperationBusyError(self.operation)
+
+        def refresh() -> None:
+            self._hardware_detector.detect(refresh=True)
+
+        started = self._start_hardware_worker(
+            name="hardware-refresh-worker",
+            task=refresh,
+            failure_event="hardware_refresh_failed",
+        )
+        if started:
+            EventBus.emit("hardware_refresh_started", {})
+        return started
 
     def initialize(self) -> None:
         """Detect hardware and asynchronously apply the configured startup policy."""
@@ -615,6 +676,8 @@ class AppController:
             ocr_token = self._ocr_token
             model_token = self._model_load_token
             ocr_thread = self._ocr_thread
+        with self._hardware_thread_lock:
+            hardware_thread = self._hardware_thread
         with self._model_thread_lock:
             model_thread = self._model_thread
 
@@ -629,6 +692,10 @@ class AppController:
 
         if ocr_thread is not None and ocr_thread.is_alive():
             ocr_thread.join(timeout=15)
+        if hardware_thread is not None and hardware_thread.is_alive():
+            hardware_thread.join(timeout=15)
+            if hardware_thread.is_alive():
+                logger.warning("Hardware worker non terminato entro il timeout")
         if model_thread is not None and model_thread.is_alive():
             model_thread.join(timeout=15)
             if model_thread.is_alive():

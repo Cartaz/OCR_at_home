@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -42,8 +41,6 @@ class WebBridge(QObject):
         self._window = window
         self._events = EventBridge(controller, parent=self)
         self._events.event_received.connect(self._on_core_event)
-        self._init_thread: threading.Thread | None = None
-        self._init_thread_lock = threading.Lock()
         self._devices_snapshot: list[dict[str, Any]] = []
         self._shutdown = False
 
@@ -83,17 +80,16 @@ class WebBridge(QObject):
                 f"Impossibile avviare {kind} dopo il caricamento del modello.",
                 details=str(data.get("error") or ""),
             )
-
-    def _device_dicts(self, *, refresh: bool = False) -> list[dict[str, Any]]:
-        return [
-            {
-                "device_name": item.device_name,
-                "device_type": item.device_type,
-                "available": item.available,
-                "memory_mb": item.memory_mb,
-            }
-            for item in self._controller.get_available_devices(refresh=refresh)
-        ]
+        elif event_name == "backend_initialization_failed":
+            self._error(
+                "Impossibile inizializzare il backend OCR.",
+                details=str(data.get("error") or ""),
+            )
+        elif event_name == "hardware_refresh_failed":
+            self._error(
+                "Rilevamento hardware fallito.",
+                details=str(data.get("error") or ""),
+            )
 
     def _bootstrap_payload(self) -> dict[str, Any]:
         """Return already-available UI state without probing hardware."""
@@ -134,35 +130,17 @@ class WebBridge(QObject):
 
     @Slot()
     def initializeBackend(self) -> None:
-        """Initialize hardware detection/controller off the Qt GUI thread."""
-        with self._init_thread_lock:
-            if self._shutdown:
-                return
-            if self._init_thread is not None and self._init_thread.is_alive():
-                return
-
-            def initialize() -> None:
-                try:
-                    self._controller.initialize()
-                except Exception as exc:
-                    logger.exception("Inizializzazione controller fallita")
-                    if not self._shutdown:
-                        self._error(
-                            "Impossibile inizializzare il backend OCR.",
-                            details=str(exc),
-                        )
-                finally:
-                    with self._init_thread_lock:
-                        if self._init_thread is threading.current_thread():
-                            self._init_thread = None
-
-            thread = threading.Thread(
-                target=initialize,
-                name="backend-init-worker",
-                daemon=True,
+        """Request controller-owned asynchronous hardware/backend initialization."""
+        if self._shutdown:
+            return
+        try:
+            self._controller.request_initialize()
+        except Exception as exc:
+            logger.exception("Richiesta inizializzazione controller fallita")
+            self._error(
+                "Impossibile inizializzare il backend OCR.",
+                details=str(exc),
             )
-            self._init_thread = thread
-            thread.start()
 
     @staticmethod
     def _dialog_filter() -> str:
@@ -297,10 +275,16 @@ class WebBridge(QObject):
 
     @Slot(result=str)
     def refreshHardware(self) -> str:
+        """Start a core-owned refresh and return immediately with cached devices."""
         try:
-            devices = self._device_dicts(refresh=True)
-            self._devices_snapshot = list(devices)
-            return self._json({"ok": True, "devices": devices})
+            started = self._controller.request_hardware_refresh()
+            return self._json(
+                {
+                    "ok": True,
+                    "started": started,
+                    "devices": list(self._devices_snapshot),
+                }
+            )
         except Exception as exc:
             return self._json({"ok": False, "error": str(exc)})
 
@@ -411,10 +395,5 @@ class WebBridge(QObject):
             self._controller.cancel_active_batch()
         except Exception:
             logger.exception("Errore durante la cancellazione in shutdown")
-
-        with self._init_thread_lock:
-            init_thread = self._init_thread
-        if init_thread is not None and init_thread.is_alive():
-            init_thread.join(timeout=max(0.0, wait_ms / 1000.0))
 
         self._controller.shutdown()

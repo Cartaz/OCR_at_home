@@ -16,16 +16,25 @@ def test_main_uses_consolidated_non_blocking_web_bridge() -> None:
     assert 'logger.info("GLM OCR UI pronta")' in text
 
 
-def test_initial_bootstrap_never_probes_hardware_on_gui_thread() -> None:
-    text = (ROOT / "ui" / "web_bridge.py").read_text(encoding="utf-8")
-    assert "def _bootstrap_payload" in text
-    assert '"devices": list(self._devices_snapshot)' in text
-    bootstrap = text.split("def _bootstrap_payload", 1)[1].split(
+def test_initial_bootstrap_and_hardware_refresh_never_probe_on_gui_thread() -> None:
+    bridge = (ROOT / "ui" / "web_bridge.py").read_text(encoding="utf-8")
+    controller = (ROOT / "core" / "app_controller.py").read_text(encoding="utf-8")
+
+    assert "def _bootstrap_payload" in bridge
+    assert '"devices": list(self._devices_snapshot)' in bridge
+    bootstrap = bridge.split("def _bootstrap_payload", 1)[1].split(
         "@Slot(result=str)", 1
     )[0]
-    assert "_device_dicts" not in bootstrap
-    assert 'name="backend-init-worker"' in text
-    assert "self._controller.initialize()" in text
+    assert "get_available_devices" not in bootstrap
+    assert "threading.Thread" not in bridge
+    assert "_init_thread" not in bridge
+    assert "self._controller.request_initialize()" in bridge
+    assert "self._controller.request_hardware_refresh()" in bridge
+    assert "get_available_devices(refresh=True)" not in bridge
+
+    assert 'name="backend-init-worker"' in controller
+    assert 'name="hardware-refresh-worker"' in controller
+    assert "self._hardware_detector.detect(refresh=True)" in controller
 
 
 def test_language_selector_is_native_html_and_confidence_control_is_removed() -> None:

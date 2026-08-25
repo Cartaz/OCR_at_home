@@ -73,7 +73,8 @@
                 showNotice(
                     "Modello non scaricato",
                     "Il backend non è stato rilasciato correttamente.",
-                    String(payload.error || "")
+                    String(payload.error || ""),
+                    true
                 );
             }
             updateModelControls();
@@ -88,7 +89,9 @@
         if (!result.ok) {
             showNotice(
                 "Modello non scaricato",
-                result.error || "Impossibile rilasciare il backend."
+                result.error || "Impossibile rilasciare il backend.",
+                "",
+                true
             );
         }
     });

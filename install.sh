@@ -36,37 +36,61 @@ require_project_files() {
     fi
 }
 
+python_is_supported() {
+    "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
+PY
+}
+
 find_python() {
     local candidate
-    for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            if "$candidate" - <<'PY' >/dev/null 2>&1
-import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
-PY
-            then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
+    for candidate in python3 python3.14 python3.13 python3.12; do
+        if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
         fi
     done
     return 1
+}
+
+venv_python_is_supported() {
+    [[ -x "$VENV_DIR/bin/python" ]] && python_is_supported "$VENV_DIR/bin/python"
+}
+
+verify_python_runtime() {
+    "$VENV_DIR/bin/python" - <<'PY'
+import numpy
+import PIL
+import pymupdf
+import huggingface_hub
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+_ = numpy, PIL, pymupdf, huggingface_hub, QWebChannel, QWebEngineView
+print("Import Python critici verificati")
+PY
 }
 
 require_project_files
 
 PYTHON_CMD="$(find_python || true)"
 if [[ -z "$PYTHON_CMD" ]]; then
-    echo "Serve Python 3.11 o successivo." >&2
+    echo "Serve Python 3.12 o successivo." >&2
     exit 1
 fi
 
 log "Ambiente Python"
+if [[ -e "$VENV_DIR" ]] && ! venv_python_is_supported; then
+    warn "Ambiente virtuale incompatibile con Python 3.12+: lo ricreo."
+    rm -rf "$VENV_DIR"
+fi
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     "$PYTHON_CMD" -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
+verify_python_runtime
 
 venv_llama_sycl_works() {
     [[ -x "$VENV_DIR/bin/llama-server" ]] || return 1

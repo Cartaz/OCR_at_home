@@ -2,6 +2,8 @@
 
 (() => {
     let completedSourcePath = "";
+    let manualSavePending = false;
+    let pendingRequestId = "";
 
     const txtButton = document.querySelector("#save-single-txt-button");
     const mdButton = document.querySelector("#save-single-md-button");
@@ -26,15 +28,15 @@
     }
 
     function updateButtons() {
-        const enabled = hasSavableResult();
+        const enabled = hasSavableResult() && !manualSavePending;
         txtButton.disabled = !enabled;
         mdButton.disabled = !enabled;
 
-        const showPages = enabled && Boolean(state.singleIsPdf);
+        const showPages = hasSavableResult() && Boolean(state.singleIsPdf);
         pagesTxtButton.classList.toggle("hidden", !showPages);
         pagesMdButton.classList.toggle("hidden", !showPages);
-        pagesTxtButton.disabled = !showPages;
-        pagesMdButton.disabled = !showPages;
+        pagesTxtButton.disabled = !showPages || manualSavePending;
+        pagesMdButton.disabled = !showPages || manualSavePending;
     }
 
     function updateBatchOptionState() {
@@ -42,6 +44,45 @@
         const enabled = batchAutoSave.checked;
         batchFormat.disabled = !enabled;
         batchPdfPages.disabled = !enabled;
+    }
+
+    function beginManualSave() {
+        manualSavePending = true;
+        pendingRequestId = "";
+        updateButtons();
+    }
+
+    function finishManualSave(payload) {
+        const eventRequestId = String(payload.request_id || "");
+        if (!manualSavePending) return false;
+        if (pendingRequestId && eventRequestId && pendingRequestId !== eventRequestId) {
+            return false;
+        }
+        manualSavePending = false;
+        pendingRequestId = "";
+        updateButtons();
+        return true;
+    }
+
+    async function requestManualSave(method, format, failureTitle) {
+        beginManualSave();
+        const result = await callNative(method, completedSourcePath, format);
+        if (!result.ok) {
+            manualSavePending = false;
+            pendingRequestId = "";
+            updateButtons();
+            showNotice(
+                failureTitle,
+                result.error || "Impossibile avviare il salvataggio."
+            );
+            return;
+        }
+        // The worker can finish before this QWebChannel callback arrives. Never
+        // restore pending state here; only remember the id if the event has not
+        // already completed the request.
+        if (manualSavePending) {
+            pendingRequestId = String(result.request_id || "");
+        }
     }
 
     async function save(format) {
@@ -52,19 +93,7 @@
             );
             return;
         }
-        const result = await callNative("saveSingleResult", completedSourcePath, format);
-        if (!result.ok) {
-            showNotice(
-                "Risultato non salvato",
-                result.error || "Impossibile scrivere il file di output."
-            );
-            return;
-        }
-        showNotice(
-            "Risultato salvato",
-            `${result.name} salvato nella directory output configurata.`,
-            result.path || ""
-        );
+        await requestManualSave("saveSingleResult", format, "Risultato non salvato");
     }
 
     async function savePages(format) {
@@ -75,23 +104,7 @@
             );
             return;
         }
-        const result = await callNative(
-            "saveSinglePdfPages",
-            completedSourcePath,
-            format
-        );
-        if (!result.ok) {
-            showNotice(
-                "Pagine non salvate",
-                result.error || "Impossibile scrivere le pagine PDF."
-            );
-            return;
-        }
-        showNotice(
-            "Pagine PDF salvate",
-            `${result.count} file pagina salvati nella directory output configurata.`,
-            (result.paths || []).join("\n")
-        );
+        await requestManualSave("saveSinglePdfPages", format, "Pagine non salvate");
     }
 
     registerUiExtension({
@@ -119,6 +132,30 @@
                 completedSourcePath = String(payload.image_path || state.singlePath || "");
             } else if (type === "ocr_cancelled" || type === "ocr_failed") {
                 completedSourcePath = "";
+            } else if (type === "single_output_saved") {
+                if (finishManualSave(payload)) {
+                    if (payload.kind === "pages") {
+                        showNotice(
+                            "Pagine PDF salvate",
+                            `${Number(payload.count || 0)} file pagina salvati nella directory output configurata.`,
+                            (payload.paths || []).join("\n")
+                        );
+                    } else {
+                        showNotice(
+                            "Risultato salvato",
+                            `${String(payload.name || "Risultato OCR")} salvato nella directory output configurata.`,
+                            String(payload.path || "")
+                        );
+                    }
+                }
+            } else if (type === "single_output_save_failed") {
+                if (finishManualSave(payload)) {
+                    showNotice(
+                        payload.kind === "pages" ? "Pagine non salvate" : "Risultato non salvato",
+                        "Impossibile scrivere il file di output.",
+                        String(payload.error || "")
+                    );
+                }
             } else if (type === "batch_output_save_failed") {
                 showNotice(
                     "Output batch non salvato",

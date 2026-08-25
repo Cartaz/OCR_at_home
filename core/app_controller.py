@@ -658,12 +658,23 @@ class AppController:
         EventBus.emit("config_changed", overrides)
 
     def save_single_result(self, source_path: str, file_format: str) -> Path:
-        """Persist the canonical completed single-OCR result."""
+        """Persist the canonical completed single-OCR result synchronously."""
         return self._output_workflow.save_single_result(source_path, file_format)
 
     def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
-        """Persist canonical page texts from a completed single-PDF OCR."""
+        """Persist canonical page texts synchronously."""
         return self._output_workflow.save_single_pdf_pages(source_path, file_format)
+
+    def request_save_single_result(self, source_path: str, file_format: str) -> str:
+        """Queue canonical combined output without blocking the caller thread."""
+        return self._output_workflow.request_save_single_result(source_path, file_format)
+
+    def request_save_single_pdf_pages(self, source_path: str, file_format: str) -> str:
+        """Queue canonical PDF page outputs without blocking the caller thread."""
+        return self._output_workflow.request_save_single_pdf_pages(
+            source_path,
+            file_format,
+        )
 
     def shutdown(self) -> None:
         """Cancel operations, join owned workers and release the backend."""

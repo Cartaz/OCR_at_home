@@ -84,31 +84,25 @@ class AppWebBridge(WebBridge):
     @Slot(str, str, result=str)
     def saveSingleResult(self, source_path: str, file_format: str) -> str:
         try:
-            destination = self._controller.save_single_result(source_path, file_format)
-            return self._json(
-                {
-                    "ok": True,
-                    "path": str(destination),
-                    "name": destination.name,
-                }
+            request_id = self._controller.request_save_single_result(
+                source_path,
+                file_format,
             )
+            return self._json({"ok": True, "request_id": request_id})
         except Exception as exc:
-            logger.warning("Salvataggio risultato OCR fallito: %s", exc)
+            logger.warning("Richiesta salvataggio risultato OCR rifiutata: %s", exc)
             return self._json({"ok": False, "error": str(exc)})
 
     @Slot(str, str, result=str)
     def saveSinglePdfPages(self, source_path: str, file_format: str) -> str:
         try:
-            outputs = self._controller.save_single_pdf_pages(source_path, file_format)
-            return self._json(
-                {
-                    "ok": True,
-                    "paths": [str(path) for path in outputs],
-                    "count": len(outputs),
-                }
+            request_id = self._controller.request_save_single_pdf_pages(
+                source_path,
+                file_format,
             )
+            return self._json({"ok": True, "request_id": request_id})
         except Exception as exc:
-            logger.warning("Salvataggio pagine PDF fallito: %s", exc)
+            logger.warning("Richiesta salvataggio pagine PDF rifiutata: %s", exc)
             return self._json({"ok": False, "error": str(exc)})
 
     @Slot(str, result=str)

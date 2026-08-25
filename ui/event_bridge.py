@@ -35,6 +35,8 @@ class EventBridge(QObject):
         "ocr_failed",
         "pdf_progress",
         "pdf_page_completed",
+        "single_output_saved",
+        "single_output_save_failed",
         "batch_started",
         "batch_progress",
         "batch_task_completed",

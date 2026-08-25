@@ -10,13 +10,20 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from config.settings import Settings
 from core.event_bus import EventBus
-from core.output_writer import split_combined_pdf_text, write_ocr_pages, write_ocr_text
+from core.output_writer import (
+    SUPPORTED_TEXT_FORMATS,
+    split_combined_pdf_text,
+    write_ocr_pages,
+    write_ocr_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +69,20 @@ class OutputWorkflow:
         self._batch_saved_count = 0
         self._batch_save_failures = 0
         self._subscriptions: list[tuple[str, Callable[[dict], None]]] = []
+        self._manual_thread: threading.Thread | None = None
         self._shutdown = False
         self._subscribe()
 
     @staticmethod
     def _canonical_source(source_path: str) -> str:
         return str(Path(source_path).expanduser().resolve()) if source_path else ""
+
+    @staticmethod
+    def _normalize_format(file_format: str) -> str:
+        fmt = str(file_format).strip().lower().lstrip(".")
+        if fmt not in SUPPORTED_TEXT_FORMATS:
+            raise ValueError(f"Formato output non supportato: {file_format}")
+        return fmt
 
     def _subscribe(self) -> None:
         for event_name in self._EVENTS:
@@ -173,6 +188,7 @@ class OutputWorkflow:
         return result
 
     def save_single_result(self, source_path: str, file_format: str) -> Path:
+        """Synchronous persistence API for tests/non-GUI integrations."""
         result = self._require_single(source_path)
         settings = self._settings_provider()
         destination = write_ocr_text(
@@ -185,6 +201,7 @@ class OutputWorkflow:
         return destination
 
     def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
+        """Synchronous persistence API for tests/non-GUI integrations."""
         result = self._require_single(source_path)
         if not result.pdf_pages:
             raise RuntimeError("Nessuna pagina PDF completata da salvare")
@@ -197,6 +214,97 @@ class OutputWorkflow:
         )
         logger.info("Salvate %d pagine OCR separate per %s", len(outputs), result.source)
         return outputs
+
+    def _start_manual_save(
+        self,
+        kind: str,
+        write: Callable[[], dict[str, object]],
+    ) -> str:
+        request_id = uuid.uuid4().hex
+
+        def run() -> None:
+            try:
+                payload = write()
+                with self._lock:
+                    publish = not self._shutdown
+                if publish:
+                    EventBus.emit(
+                        "single_output_saved",
+                        {"request_id": request_id, "kind": kind, **payload},
+                    )
+            except Exception as exc:
+                logger.warning("Salvataggio manuale OCR fallito (%s): %s", kind, exc)
+                with self._lock:
+                    publish = not self._shutdown
+                if publish:
+                    EventBus.emit(
+                        "single_output_save_failed",
+                        {
+                            "request_id": request_id,
+                            "kind": kind,
+                            "error": str(exc),
+                        },
+                    )
+            finally:
+                with self._lock:
+                    if self._manual_thread is threading.current_thread():
+                        self._manual_thread = None
+
+        thread = threading.Thread(
+            target=run,
+            name=f"manual-output-{request_id[:8]}",
+            daemon=True,
+        )
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("Output workflow in arresto")
+            if self._manual_thread is not None and self._manual_thread.is_alive():
+                raise RuntimeError("Un salvataggio manuale è già in corso")
+            self._manual_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            with self._lock:
+                if self._manual_thread is thread:
+                    self._manual_thread = None
+            raise
+        return request_id
+
+    def request_save_single_result(self, source_path: str, file_format: str) -> str:
+        """Snapshot canonical state and persist combined output off the caller thread."""
+        result = self._require_single(source_path)
+        fmt = self._normalize_format(file_format)
+        output_dir = str(self._settings_provider().output_dir)
+
+        def write() -> dict[str, object]:
+            destination = write_ocr_text(output_dir, result.source, result.text, fmt)
+            logger.info("Risultato OCR salvato in %s", destination)
+            return {"path": str(destination), "name": destination.name}
+
+        return self._start_manual_save("combined", write)
+
+    def request_save_single_pdf_pages(self, source_path: str, file_format: str) -> str:
+        """Snapshot canonical PDF pages and persist them off the caller thread."""
+        result = self._require_single(source_path)
+        if not result.pdf_pages:
+            raise RuntimeError("Nessuna pagina PDF completata da salvare")
+        fmt = self._normalize_format(file_format)
+        output_dir = str(self._settings_provider().output_dir)
+
+        def write() -> dict[str, object]:
+            outputs = write_ocr_pages(
+                output_dir,
+                result.source,
+                result.pdf_pages,
+                fmt,
+            )
+            logger.info("Salvate %d pagine OCR separate per %s", len(outputs), result.source)
+            return {
+                "paths": [str(path) for path in outputs],
+                "count": len(outputs),
+            }
+
+        return self._start_manual_save("pages", write)
 
     def _start_batch(self) -> None:
         settings = self._settings_provider()
@@ -283,11 +391,22 @@ class OutputWorkflow:
                 },
             )
 
-    def shutdown(self) -> None:
-        if self._shutdown:
-            return
-        self._shutdown = True
+    def shutdown(self, wait_seconds: float = 5.0) -> None:
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            manual_thread = self._manual_thread
+
         for event_name, handler in self._subscriptions:
             EventBus.unsubscribe(event_name, handler)
         self._subscriptions.clear()
         self._clear_single_state()
+
+        if manual_thread is not None and manual_thread.is_alive():
+            manual_thread.join(timeout=max(0.0, wait_seconds))
+            if manual_thread.is_alive():
+                logger.warning(
+                    "Worker output manuale non terminato entro il timeout: %s",
+                    manual_thread.name,
+                )

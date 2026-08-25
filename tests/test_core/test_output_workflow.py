@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -43,11 +44,65 @@ def test_single_result_uses_python_owned_completed_text(tmp_path: Path) -> None:
         workflow.shutdown()
 
 
+def test_manual_save_request_returns_while_writer_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workflow, _settings = _workflow(tmp_path)
+    source = str(tmp_path / "scan.png")
+    writer_started = threading.Event()
+    writer_release = threading.Event()
+    saved_event = threading.Event()
+    payloads: list[dict] = []
+
+    def blocked_writer(*_args, **_kwargs) -> Path:
+        writer_started.set()
+        assert writer_release.wait(timeout=2)
+        return tmp_path / "scan.txt"
+
+    def capture(payload: dict) -> None:
+        payloads.append(dict(payload))
+        saved_event.set()
+
+    monkeypatch.setattr("core.output_workflow.write_ocr_text", blocked_writer)
+    EventBus.subscribe("single_output_saved", capture)
+    try:
+        EventBus.emit(
+            "ocr_completed",
+            {
+                "mode": "single",
+                "image_path": source,
+                "is_pdf": False,
+                "text": "testo canonico",
+            },
+        )
+
+        request_id = workflow.request_save_single_result(source, "txt")
+        assert request_id
+        assert writer_started.wait(timeout=1)
+        assert not saved_event.is_set()
+
+        with pytest.raises(RuntimeError, match="già in corso"):
+            workflow.request_save_single_result(source, "md")
+
+        writer_release.set()
+        assert saved_event.wait(timeout=1)
+        assert payloads[-1] == {
+            "request_id": request_id,
+            "kind": "combined",
+            "path": str(tmp_path / "scan.txt"),
+            "name": "scan.txt",
+        }
+    finally:
+        writer_release.set()
+        EventBus.unsubscribe("single_output_saved", capture)
+        workflow.shutdown()
+
+
 def test_pdf_result_requires_complete_page_sequence(tmp_path: Path) -> None:
     workflow, _settings = _workflow(tmp_path)
     source = str(tmp_path / "document.pdf")
     try:
-        # An incomplete completion invalidates the whole temporary result.
         EventBus.emit(
             "ocr_started",
             {"mode": "single", "image_path": source, "is_pdf": True},
@@ -69,7 +124,6 @@ def test_pdf_result_requires_complete_page_sequence(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError):
             workflow.save_single_result(source, "txt")
 
-        # A new complete OCR may then become the canonical savable result.
         EventBus.emit(
             "ocr_started",
             {"mode": "single", "image_path": source, "is_pdf": True},

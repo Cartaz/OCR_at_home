@@ -197,7 +197,10 @@ Goal: improve speed of use without adding decorative complexity.
 
 - [ ] Drag and drop images/PDFs.
 - [ ] Paste image from clipboard.
-- [ ] Keyboard shortcuts (`Ctrl+O`, OCR start shortcut, copy result).
+- [x] Keyboard shortcuts (`Ctrl+O`, OCR start shortcut, copy result).
+  - `Ctrl+O` opens the single-file picker, `Ctrl+Enter` starts OCR or batch according to the active view, and `Ctrl+Shift+C` copies the OCR result.
+  - Shortcuts activate existing controls and therefore inherit disabled/busy rules; normal `Ctrl+C` remains untouched.
+  - Controls expose `aria-keyshortcuts`/tooltips and real Qt WebEngine coverage dispatches keyboard events through the production listener.
 - [x] Remove individual files from a batch before starting.
   - Batch selection remains temporary JavaScript presentation state; no new backend API was introduced.
   - Removal is disabled outside `idle`, so a submitted/running queue cannot be mutated from the UI.

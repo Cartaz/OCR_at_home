@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from config.settings import Settings
+from core.event_bus import EventBus
 from ui.app_web_bridge import AppWebBridge
 
 
@@ -46,6 +47,22 @@ def _bridge(tmp_path: Path, **overrides: object) -> tuple[AppWebBridge, _DummyCo
     return AppWebBridge(controller), controller
 
 
+def _emit_single_image(source: str, text: str) -> None:
+    EventBus.emit(
+        "ocr_started",
+        {"mode": "single", "image_path": source, "is_pdf": False},
+    )
+    EventBus.emit(
+        "ocr_completed",
+        {
+            "mode": "single",
+            "image_path": source,
+            "is_pdf": False,
+            "text": text,
+        },
+    )
+
+
 def test_output_settings_are_validated_and_persisted_in_controller(tmp_path: Path) -> None:
     bridge, controller = _bridge(tmp_path)
     try:
@@ -71,41 +88,34 @@ def test_output_settings_are_validated_and_persisted_in_controller(tmp_path: Pat
         assert invalid["ok"] is False
         assert controller.settings.batch_output_format == "md"
     finally:
-        bridge._events.shutdown()
+        bridge.shutdown()
 
 
 def test_single_result_cannot_be_saved_before_real_completion(tmp_path: Path) -> None:
     bridge, _controller = _bridge(tmp_path)
     source = str(tmp_path / "scan.png")
     try:
-        rejected = json.loads(bridge.saveSingleResult(source, "parziale", "txt"))
+        rejected = json.loads(bridge.saveSingleResult(source, "txt"))
         assert rejected["ok"] is False
         assert not list(tmp_path.glob("scan*.txt"))
 
-        bridge._on_core_event(
-            "ocr_started",
-            {"mode": "single", "image_path": source, "is_pdf": False},
-        )
-        bridge._on_core_event(
-            "ocr_completed",
-            {"mode": "single", "image_path": source, "is_pdf": False},
-        )
-        saved = json.loads(bridge.saveSingleResult(source, "completo", "txt"))
+        _emit_single_image(source, "completo")
+        saved = json.loads(bridge.saveSingleResult(source, "txt"))
         assert saved["ok"] is True
         assert Path(saved["path"]).read_text(encoding="utf-8") == "completo\n"
     finally:
-        bridge._events.shutdown()
+        bridge.shutdown()
 
 
 def test_single_pdf_pages_are_saved_only_after_complete_sequence(tmp_path: Path) -> None:
     bridge, _controller = _bridge(tmp_path)
     source = str(tmp_path / "document.pdf")
     try:
-        bridge._on_core_event(
+        EventBus.emit(
             "ocr_started",
             {"mode": "single", "image_path": source, "is_pdf": True},
         )
-        bridge._on_core_event(
+        EventBus.emit(
             "pdf_page_completed",
             {
                 "mode": "single",
@@ -115,7 +125,7 @@ def test_single_pdf_pages_are_saved_only_after_complete_sequence(tmp_path: Path)
                 "text": "pagina uno",
             },
         )
-        bridge._on_core_event(
+        EventBus.emit(
             "pdf_page_completed",
             {
                 "mode": "single",
@@ -125,7 +135,7 @@ def test_single_pdf_pages_are_saved_only_after_complete_sequence(tmp_path: Path)
                 "text": "pagina due",
             },
         )
-        bridge._on_core_event(
+        EventBus.emit(
             "ocr_completed",
             {"mode": "single", "image_path": source, "is_pdf": True},
         )
@@ -138,7 +148,7 @@ def test_single_pdf_pages_are_saved_only_after_complete_sequence(tmp_path: Path)
             "document-page-002.md",
         ]
     finally:
-        bridge._events.shutdown()
+        bridge.shutdown()
 
 
 def test_batch_autosave_uses_start_snapshot_and_saves_pdf_pages(tmp_path: Path) -> None:
@@ -180,4 +190,4 @@ def test_batch_autosave_uses_start_snapshot_and_saves_pdf_pages(tmp_path: Path) 
         assert summaries[-1]["payload"]["failed"] == 0
         assert summaries[-1]["payload"]["output_dir"] == str(first_dir)
     finally:
-        bridge._events.shutdown()
+        bridge.shutdown()

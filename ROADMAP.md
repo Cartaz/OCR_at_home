@@ -198,7 +198,10 @@ Goal: improve speed of use without adding decorative complexity.
 - [ ] Drag and drop images/PDFs.
 - [ ] Paste image from clipboard.
 - [ ] Keyboard shortcuts (`Ctrl+O`, OCR start shortcut, copy result).
-- [ ] Remove individual files from a batch before starting.
+- [x] Remove individual files from a batch before starting.
+  - Batch selection remains temporary JavaScript presentation state; no new backend API was introduced.
+  - Removal is disabled outside `idle`, so a submitted/running queue cannot be mutated from the UI.
+  - Real Qt WebEngine coverage verifies selection cleanup, count/start state and busy protection.
 - [ ] Review empty/error/loading states for clarity and accessibility.
 
 Acceptance criteria:

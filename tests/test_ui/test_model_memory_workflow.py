@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 from config.settings import Settings
@@ -25,34 +24,70 @@ class _DummyController:
         self.engine = _DummyEngine(initialized)
         self.process_manager = _DummyProcessManager()
         self.operation = "idle"
-        self.load_requests: list[str] = []
-        self.unload_requests = 0
         self.started_ocr: list[Path] = []
         self.started_batches: list[list[Path]] = []
+        self.idle_checks = 0
+        self.unload_requests = 0
 
-    def request_model_load(self, device: str) -> None:
-        self.load_requests.append(device)
+    @property
+    def model_ready(self) -> bool:
+        return self.engine.is_initialized
+
+    @property
+    def model_device(self) -> str:
+        return self.engine.device
+
+    @property
+    def model_backend(self) -> str:
+        return self.engine.backend
+
+    @property
+    def active_batch_id(self):
+        return self.process_manager.active_job_id
+
+    def start_ocr_or_queue(self, path: Path) -> bool:
+        if self.engine.is_initialized:
+            self.started_ocr.append(Path(path))
+            self.operation = "ocr"
+            return False
+        return True
+
+    def run_batch_or_queue(self, paths: list[Path]):
+        if self.engine.is_initialized:
+            self.started_batches.append([Path(path) for path in paths])
+            self.operation = "batch"
+
+            class _Job:
+                job_id = "job-1"
+
+            return False, _Job()
+        return True, None
+
+    def request_model_load(self, _device: str) -> None:
         self.operation = "model_loading"
 
-    def request_model_unload(self) -> None:
+    def request_model_unload(self) -> bool:
         self.unload_requests += 1
+        if not self.engine.is_initialized:
+            return False
         self.operation = "model_unloading"
+        return True
 
-    def start_ocr(self, path: Path) -> None:
-        self.started_ocr.append(Path(path))
-        self.operation = "ocr"
-
-    def run_batch(self, paths: list[Path]):
-        self.started_batches.append([Path(path) for path in paths])
-        self.operation = "batch"
-
-        class _Job:
-            job_id = "job-1"
-
-        return _Job()
+    def check_idle_model_unload(self) -> bool:
+        self.idle_checks += 1
+        return False
 
     def update_settings(self, **overrides: object) -> None:
         self.settings = self.settings.with_(**overrides)
+
+    def save_single_result(self, source_path: str, file_format: str) -> Path:
+        return Path(self.settings.output_dir) / f"{Path(source_path).stem}.{file_format}"
+
+    def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
+        return [
+            Path(self.settings.output_dir)
+            / f"{Path(source_path).stem}-page-001.{file_format}"
+        ]
 
     def cancel_model_loading(self) -> None:
         pass
@@ -83,7 +118,7 @@ def _cleanup(bridge: AppWebBridge) -> None:
     bridge._events.shutdown()
 
 
-def test_single_ocr_is_queued_until_model_load_completes(tmp_path: Path) -> None:
+def test_single_ocr_queue_decision_is_owned_by_controller(tmp_path: Path) -> None:
     source = tmp_path / "scan.png"
     source.write_bytes(b"test")
     bridge, controller = _bridge(tmp_path, initialized=False)
@@ -91,19 +126,13 @@ def test_single_ocr_is_queued_until_model_load_completes(tmp_path: Path) -> None
         result = json.loads(bridge.startSingleOcr(str(source)))
 
         assert result == {"ok": True, "queued": True}
-        assert controller.load_requests == ["llama-cpp-sycl"]
         assert controller.started_ocr == []
-
-        controller.engine.is_initialized = True
-        controller.operation = "idle"
-        bridge._run_pending_model_action()
-
-        assert controller.started_ocr == [source.resolve()]
+        assert not hasattr(bridge, "_pending_model_action")
     finally:
         _cleanup(bridge)
 
 
-def test_batch_is_queued_until_model_load_completes(tmp_path: Path) -> None:
+def test_batch_queue_decision_is_owned_by_controller(tmp_path: Path) -> None:
     first = tmp_path / "one.png"
     second = tmp_path / "two.pdf"
     first.write_bytes(b"one")
@@ -114,18 +143,26 @@ def test_batch_is_queued_until_model_load_completes(tmp_path: Path) -> None:
 
         assert result["ok"] is True
         assert result["queued"] is True
-        assert controller.load_requests == ["llama-cpp-sycl"]
-
-        controller.engine.is_initialized = True
-        controller.operation = "idle"
-        bridge._run_pending_model_action()
-
-        assert controller.started_batches == [[first.resolve(), second.resolve()]]
+        assert result["job_id"] == ""
+        assert controller.started_batches == []
     finally:
         _cleanup(bridge)
 
 
-def test_explicit_unload_requests_backend_release_without_quitting(tmp_path: Path) -> None:
+def test_ready_ocr_delegates_directly_to_controller(tmp_path: Path) -> None:
+    source = tmp_path / "scan.png"
+    source.write_bytes(b"test")
+    bridge, controller = _bridge(tmp_path, initialized=True)
+    try:
+        result = json.loads(bridge.startSingleOcr(str(source)))
+
+        assert result == {"ok": True, "queued": False}
+        assert controller.started_ocr == [source.resolve()]
+    finally:
+        _cleanup(bridge)
+
+
+def test_explicit_unload_only_requests_core_lifecycle(tmp_path: Path) -> None:
     bridge, controller = _bridge(tmp_path, initialized=True)
     try:
         result = json.loads(bridge.unloadModel())
@@ -134,24 +171,21 @@ def test_explicit_unload_requests_backend_release_without_quitting(tmp_path: Pat
         assert result["already_unloaded"] is False
         assert controller.unload_requests == 1
         assert controller.operation == "model_unloading"
+        assert not hasattr(bridge, "_model_thread")
     finally:
         _cleanup(bridge)
 
 
-def test_idle_auto_unload_only_fires_after_configured_interval(tmp_path: Path) -> None:
+def test_idle_timer_only_triggers_core_policy_check(tmp_path: Path) -> None:
     bridge, controller = _bridge(
         tmp_path,
         initialized=True,
         model_auto_unload_minutes=5,
     )
     try:
-        bridge._idle_since = time.monotonic() - 4 * 60
         bridge._check_idle_unload()
+        assert controller.idle_checks == 1
         assert controller.unload_requests == 0
-
-        bridge._idle_since = time.monotonic() - 6 * 60
-        bridge._check_idle_unload()
-        assert controller.unload_requests == 1
     finally:
         _cleanup(bridge)
 

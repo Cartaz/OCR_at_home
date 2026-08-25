@@ -100,6 +100,7 @@ def test_webengine_routes_validated_drops_by_active_view() -> None:
         (() => {
             state.operation = 'idle';
             state.modelReady = true;
+            state.devices = [{available: true, device_name: 'SYCL'}];
 
             setView('ocr');
             handleEvent(JSON.stringify({

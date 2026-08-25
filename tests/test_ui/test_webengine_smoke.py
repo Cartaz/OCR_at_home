@@ -261,6 +261,74 @@ def test_keyboard_shortcuts_delegate_to_existing_controls() -> None:
     _ = app
 
 
+def test_accessible_error_loading_and_progress_states() -> None:
+    app, window = _load_window()
+    script = """
+        (() => {
+            const origin = document.querySelector('#single-file-button');
+            origin.focus();
+            showNotice('Errore', 'Operazione fallita', 'dettaglio', true);
+            const urgent = [
+                document.querySelector('#notice').getAttribute('role'),
+                document.querySelector('#notice').getAttribute('aria-live'),
+                document.activeElement.id
+            ];
+            hideNotice();
+            const restoredFocus = document.activeElement.id;
+
+            showNotice('Salvato', 'Operazione completata');
+            const polite = [
+                document.querySelector('#notice').getAttribute('role'),
+                document.querySelector('#notice').getAttribute('aria-live'),
+                document.activeElement.id
+            ];
+            hideNotice();
+
+            state.operation = 'ocr';
+            updateOperationUi();
+            const ocrBusy = document.querySelector('#view-ocr').getAttribute('aria-busy');
+            state.operation = 'batch';
+            updateOperationUi();
+            const batchBusy = document.querySelector('#view-batch').getAttribute('aria-busy');
+            state.operation = 'model_loading';
+            updateOperationUi();
+            const settingsBusy = document.querySelector('#view-settings').getAttribute('aria-busy');
+            state.operation = 'idle';
+            updateOperationUi();
+
+            setProgress('#single-progress', 40, '2 / 5');
+            setProgress('#batch-progress', 50, '3 / 6');
+            return JSON.stringify([
+                urgent,
+                restoredFocus,
+                polite,
+                ocrBusy,
+                batchBusy,
+                settingsBusy,
+                document.querySelector('#single-progress').getAttribute('aria-valuetext'),
+                document.querySelector('#batch-progress').getAttribute('aria-valuetext'),
+                document.querySelector('#single-result-meta').getAttribute('aria-live'),
+                document.querySelector('#batch-count-label').getAttribute('aria-live')
+            ]);
+        })();
+    """
+
+    assert _run_json_script(window, script) == [
+        ["alert", "assertive", "notice"],
+        "single-file-button",
+        ["status", "polite", "single-file-button"],
+        "true",
+        "true",
+        "true",
+        "2 / 5",
+        "3 / 6",
+        "polite",
+        "polite",
+    ]
+    _close_window(window)
+    _ = app
+
+
 def test_safe_controls_remain_available_during_model_load() -> None:
     script = (ROOT / "ui" / "web" / "app.js").read_text(encoding="utf-8")
     assert '$("#single-file-button").disabled = busy' in script

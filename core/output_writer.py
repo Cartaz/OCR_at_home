@@ -76,6 +76,20 @@ def _prepare_output_directory(output_dir: str | Path) -> Path:
     return directory
 
 
+def _fsync_directory(directory: Path) -> None:
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+    finally:
+        os.close(dir_fd)
+
+
 def _write_atomic_unique(
     directory: Path,
     stem: str,
@@ -111,18 +125,7 @@ def _write_atomic_unique(
             except FileExistsError:
                 index += 1
 
-        try:
-            dir_fd = os.open(directory, os.O_RDONLY)
-        except OSError:
-            dir_fd = -1
-        if dir_fd >= 0:
-            try:
-                os.fsync(dir_fd)
-            except OSError:
-                pass
-            finally:
-                os.close(dir_fd)
-
+        _fsync_directory(directory)
         return destination
     finally:
         try:
@@ -154,7 +157,12 @@ def write_ocr_pages(
     page_texts: Sequence[str],
     file_format: str,
 ) -> list[Path]:
-    """Publish one collision-safe output file per PDF page."""
+    """Publish one collision-safe file per PDF page as one logical output set.
+
+    Each individual file is published atomically. If a later page fails, files
+    already published by this invocation are removed so a failed operation does
+    not silently leave a partial page set behind.
+    """
     if isinstance(page_texts, (str, bytes)) or not page_texts:
         raise ValueError("Nessuna pagina PDF da salvare")
 
@@ -163,14 +171,31 @@ def write_ocr_pages(
     base_stem = safe_source_stem(source_path)
     width = max(3, len(str(len(page_texts))))
     outputs: list[Path] = []
-    for page_num, page_text in enumerate(page_texts, start=1):
-        outputs.append(
-            _write_atomic_unique(
-                directory,
-                f"{base_stem}-page-{page_num:0{width}d}",
-                str(page_text),
-                f".{fmt}",
-                allow_empty=True,
+    try:
+        for page_num, page_text in enumerate(page_texts, start=1):
+            outputs.append(
+                _write_atomic_unique(
+                    directory,
+                    f"{base_stem}-page-{page_num:0{width}d}",
+                    str(page_text),
+                    f".{fmt}",
+                    allow_empty=True,
+                )
             )
-        )
-    return outputs
+        return outputs
+    except Exception as exc:
+        cleanup_failures: list[str] = []
+        for path in reversed(outputs):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as cleanup_exc:
+                cleanup_failures.append(f"{path}: {cleanup_exc}")
+        _fsync_directory(directory)
+        if cleanup_failures:
+            raise OSError(
+                "Salvataggio pagine fallito e cleanup output parziale incompleto: "
+                + "; ".join(cleanup_failures)
+            ) from exc
+        raise

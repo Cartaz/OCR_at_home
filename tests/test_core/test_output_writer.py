@@ -81,3 +81,27 @@ def test_write_ocr_pages_uses_numbered_collision_safe_names(tmp_path: Path) -> N
     assert first[0].read_text(encoding="utf-8") == "uno\n"
     assert first[1].read_text(encoding="utf-8") == ""
     assert second[1].read_text(encoding="utf-8") == "due\n"
+
+
+def test_write_ocr_pages_rolls_back_files_if_later_page_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import core.output_writer as output_writer
+
+    original = output_writer._write_atomic_unique
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated second-page failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(output_writer, "_write_atomic_unique", fail_second)
+
+    with pytest.raises(OSError, match="second-page failure"):
+        write_ocr_pages(tmp_path, "/docs/report.pdf", ["uno", "due"], "txt")
+
+    assert list(tmp_path.iterdir()) == []

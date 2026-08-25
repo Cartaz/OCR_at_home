@@ -90,13 +90,11 @@ def test_output_settings_are_validated_and_persisted_in_controller(tmp_path: Pat
         bridge._events.shutdown()
 
 
-def test_single_save_delegates_to_python_canonical_result(tmp_path: Path) -> None:
+def test_single_save_delegates_only_source_and_format_to_controller(tmp_path: Path) -> None:
     bridge, controller = _bridge(tmp_path)
     source = str(tmp_path / "scan.png")
     try:
-        result = json.loads(
-            bridge.saveSingleResult(source, "testo UI manipolato", "txt")
-        )
+        result = json.loads(bridge.saveSingleResult(source, "txt"))
         assert result["ok"] is True
         assert controller.saved_single == (source, "txt")
         assert Path(result["path"]).read_text(encoding="utf-8") == "canonico\n"

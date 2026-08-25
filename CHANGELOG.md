@@ -22,6 +22,7 @@
 
 ### Bug corretti
 
+- Il lifecycle asincrono del modello rilascia ora l'ownership del worker prima di pubblicare `idle`, eliminando la race che poteva rifiutare un reload immediato dopo unload/load completato.
 - Completato il forwarding EventBus -> Qt per gli eventi di completamento/fallimento di model lifecycle, hardware e operazioni accodate, evitando UI stale dopo eventi core corretti.
 - Il salvataggio PDF multipagina effettua rollback dei file pubblicati dalla stessa richiesta se una pagina successiva fallisce.
 - `ProcessManager` pubblica `batch_started` prima di rendere eseguibile il worker, eliminando la race con `batch_task_completed` e lo snapshot delle opzioni di output.

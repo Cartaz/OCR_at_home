@@ -78,7 +78,6 @@
         const result = await callNative(
             "saveSingleResult",
             resultSourcePath,
-            state.singleText,
             format
         );
         if (!result.ok) {

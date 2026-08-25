@@ -232,15 +232,8 @@ class AppWebBridge(WebBridge):
             self._error("Impossibile scaricare il modello.", details=str(exc))
             return self._json({"ok": False, "error": str(exc)})
 
-    @Slot(str, str, str, result=str)
-    def saveSingleResult(
-        self,
-        source_path: str,
-        displayed_text: str,
-        file_format: str,
-    ) -> str:
-        """Persist the Python-owned canonical result; displayed_text is legacy UI input."""
-        _ = displayed_text
+    @Slot(str, str, result=str)
+    def saveSingleResult(self, source_path: str, file_format: str) -> str:
         try:
             destination = self._controller.save_single_result(source_path, file_format)
             return self._json(

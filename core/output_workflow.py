@@ -1,8 +1,8 @@
 """Canonical OCR-result ownership and durable output workflow.
 
-This module owns completed single-OCR state and batch output policy.  It listens
+This module owns completed single-OCR state and batch output policy. It listens
 to core events directly, so durable output does not depend on the presentation
-bridge being present.  Filesystem publication remains delegated to
+bridge being present. Filesystem publication remains delegated to
 ``output_writer``.
 """
 
@@ -77,16 +77,17 @@ class OutputWorkflow:
             EventBus.subscribe(event_name, handler)
             self._subscriptions.append((event_name, handler))
 
+    def _clear_single_state(self) -> None:
+        with self._lock:
+            self._completed_single = None
+            self._pending_pdf_pages.clear()
+            self._pending_pdf_totals.clear()
+
     def _handle_event(self, event_name: str, data: dict) -> None:
         if self._shutdown:
             return
         if event_name == "ocr_started" and data.get("mode") == "single":
-            source = self._canonical_source(str(data.get("image_path") or ""))
-            with self._lock:
-                self._completed_single = None
-                if source:
-                    self._pending_pdf_pages.pop(source, None)
-                    self._pending_pdf_totals.pop(source, None)
+            self._clear_single_state()
             return
         if event_name == "pdf_page_completed" and data.get("mode") == "single":
             self._record_pdf_page(data)
@@ -95,8 +96,7 @@ class OutputWorkflow:
             self._record_completed_single(data)
             return
         if event_name in {"ocr_cancelled", "ocr_failed"} and data.get("mode") == "single":
-            with self._lock:
-                self._completed_single = None
+            self._clear_single_state()
             return
         if event_name == "batch_started":
             self._start_batch()
@@ -142,8 +142,7 @@ class OutputWorkflow:
         expected = list(range(1, total_pages + 1))
         if total_pages <= 0 or sorted(page_map) != expected:
             logger.warning("Risultato PDF completato senza sequenza pagine canonica: %s", source)
-            with self._lock:
-                self._completed_single = None
+            self._clear_single_state()
             return
         pages = tuple(page_map[number] for number in expected)
         text = (
@@ -160,6 +159,8 @@ class OutputWorkflow:
                 text=text,
                 pdf_pages=pages,
             )
+            self._pending_pdf_pages.clear()
+            self._pending_pdf_totals.clear()
 
     def _require_single(self, source_path: str) -> CompletedSingleResult:
         source = self._canonical_source(source_path)
@@ -289,3 +290,4 @@ class OutputWorkflow:
         for event_name, handler in self._subscriptions:
             EventBus.unsubscribe(event_name, handler)
         self._subscriptions.clear()
+        self._clear_single_state()

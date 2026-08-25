@@ -94,6 +94,13 @@ function operationLabel(operation) {
     return labels[operation] || operation;
 }
 
+function refreshBatchRemovalControls() {
+    const disabled = state.operation !== "idle";
+    $$(".batch-remove-button").forEach((button) => {
+        button.disabled = disabled;
+    });
+}
+
 function updateOperationUi() {
     const op = state.operation;
     const busy = op !== "idle";
@@ -114,6 +121,7 @@ function updateOperationUi() {
     $("#hardware-refresh-button").disabled = busy;
     $("#global-cancel-button").classList.toggle("hidden", !busy || op === "shutting_down");
     $("#global-cancel-button").disabled = !busy || op === "shutting_down";
+    refreshBatchRemovalControls();
 
     const sidebarText = op === "idle" ? (state.modelReady ? "Pronto" : "Backend non pronto") : label;
     $("#sidebar-status-text").textContent = sidebarText;
@@ -168,6 +176,18 @@ function formatResultMeta(payload) {
     return parts.length ? parts.join(" · ") : "Elaborazione completata";
 }
 
+function removeBatchPath(path) {
+    if (state.operation !== "idle") return;
+    const index = state.batchPaths.indexOf(path);
+    if (index < 0) return;
+    state.batchPaths.splice(index, 1);
+    state.batchStates.delete(path);
+    state.batchResults.delete(path);
+    renderBatchFiles();
+    renderBatchResults();
+    updateOperationUi();
+}
+
 function renderBatchFiles() {
     const list = $("#batch-file-list");
     list.replaceChildren();
@@ -186,12 +206,23 @@ function renderBatchFiles() {
         name.className = "batch-file-name";
         name.textContent = basename(path);
         name.title = path;
+        const controls = document.createElement("div");
+        controls.className = "inline-controls";
         const status = document.createElement("span");
         const value = state.batchStates.get(path) || "In coda";
         status.className = "batch-file-state";
         if (["Completato", "In elaborazione"].includes(value)) status.classList.add("active");
         status.textContent = value;
-        row.append(name, status);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "icon-button compact batch-remove-button";
+        remove.textContent = "×";
+        remove.title = `Rimuovi ${basename(path)} dalla coda`;
+        remove.setAttribute("aria-label", remove.title);
+        remove.disabled = state.operation !== "idle";
+        remove.addEventListener("click", () => removeBatchPath(path));
+        controls.append(status, remove);
+        row.append(name, controls);
         list.append(row);
     }
 }

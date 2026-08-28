@@ -13,7 +13,7 @@ def test_canonical_policy_owns_current_baseline_and_schema() -> None:
     baseline = canonical_policy.production_baseline()
     assert baseline.max_image_dim == 8192
     assert baseline.runtime.context_size == 16384
-    assert runner.CHECKPOINT_SCHEMA == canonical_policy.CHECKPOINT_SCHEMA == 5
+    assert runner.CHECKPOINT_SCHEMA == canonical_policy.CHECKPOINT_SCHEMA == 6
     assert runner.production_baseline is canonical_policy.production_baseline
     assert runner.quality_reference is canonical_policy.quality_reference
 

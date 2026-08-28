@@ -31,7 +31,7 @@ from tests.benchmark.runtime_backend import (
     runtime_stage_a_values,
 )
 
-CHECKPOINT_SCHEMA = 5
+CHECKPOINT_SCHEMA = 6
 BENCHMARK_BASELINE_MAX_IMAGE_DIM = 8192
 
 

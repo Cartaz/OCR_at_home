@@ -82,6 +82,7 @@ Canonical settings:
 - average the middle 3;
 - rotate FACILE/MEDIO/DIFFICILE order between runs;
 - fresh app-owned `llama-server` for every tested profile;
+- targeted `POSIX_FADV_DONTNEED` for benchmark GGUF/input files plus bounded host-memory stabilization before and after every profile; no global `drop_caches` and no root requirement;
 - non-corpus warm-up after every server start;
 - `cache_prompt=false` on benchmark requests;
 - any configuration reporting non-zero `cache_n` is excluded from speed decisions;
@@ -147,7 +148,9 @@ The benchmark runtime remains SYCL-only, full GPU-layer offload and `--parallel 
 
 Variables intentionally not treated as OCR inference tuning include process priority/CPU affinity, multi-user parallelism, model load mode/mmap and partial `-ngl`: they either measure host scheduling/startup, a different concurrency workload, or violate the strict full-offload target.
 
-Server RSS is sampled after warm-up as a diagnostic in addition to latency/accuracy metrics.
+Memory telemetry is sampled throughout every OCR request. Each observation records minimum host `MemAvailable`, minimum free RAM, peak cache, peak swap use, peak `llama-server` RSS and peak benchmark-harness RSS. This system-level signal is especially important on integrated GPUs, where GPU allocations compete with the host for the same physical RAM.
+
+If `llama-server` terminates during a request, the retry is never sent to the dead port. The runner captures exit/log diagnostics, shuts down the owned process group, performs targeted cache eviction and memory stabilization, starts the exact same runtime profile again, performs the non-corpus warm-up and retries the document. Repeated OOM-like termination after that clean restart is classified as `resource_limit_confirmed`; a single OOM-like termination is only `resource_limit_suspected`.
 
 ## Quality gates
 
@@ -206,7 +209,7 @@ The result directory contains:
 - `pareto.csv`;
 - `outputs/` — raw OCR text from each run.
 
-Ranking rows include pipeline values, runtime values, overall CER/WER/accuracy, speedup, JPEG transfer size and MAIUSCOLO/SCRIPT/CORSIVO metrics.
+Ranking rows include pipeline values, runtime values, overall CER/WER/accuracy, speedup, JPEG transfer size and MAIUSCOLO/SCRIPT/CORSIVO metrics. Per-observation memory telemetry and any runtime-recovery classification are preserved in `checkpoint.json` and `results.json`.
 
 ## Resume
 
@@ -217,7 +220,7 @@ The benchmark checkpoints after every document. Resume with:
   --resume benchmark-results/realworld-v2-YYYYMMDD-HHMMSS
 ```
 
-All four input hashes are checked before continuing.
+All four input hashes are checked before continuing. Memory isolation is part of the canonical protocol and uses checkpoint schema **6**; older schema-5 checkpoints are deliberately rejected so measurements taken under different host-memory conditions are never mixed.
 
 The run can also be deliberately split:
 

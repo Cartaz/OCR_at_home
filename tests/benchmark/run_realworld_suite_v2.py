@@ -35,6 +35,12 @@ from tests.benchmark.canonical_policy import (  # noqa: E402
     select_fastest_quality_gated_values,
     stage_a_groups,
 )
+from tests.benchmark.memory_guard import (  # noqa: E402
+    MEMORY_ISOLATION_VERSION,
+    MemorySampler,
+    process_rss_mib,
+    settle_benchmark_memory,
+)
 from tests.benchmark.realworld_suite_v2 import (  # noqa: E402
     BENCHMARK_SEED,
     DEFAULT_BEAM_WIDTH,
@@ -64,8 +70,8 @@ from tests.benchmark.runtime_backend import (  # noqa: E402
     BenchmarkLlamaServerBackend,
     RuntimeCapabilities,
     ServerRuntimeConfig,
+    benchmark_cache_paths,
     detect_runtime_capabilities,
-    process_rss_mib,
 )
 
 BORDERLINE_RUNS = 10
@@ -153,6 +159,7 @@ def _initial_state(inputs: dict[str, Any], args: argparse.Namespace, capabilitie
             "beam_width": args.beam_width,
             "seed": BENCHMARK_SEED,
             "cache_prompt": False,
+            "memory_isolation": MEMORY_ISOLATION_VERSION,
         },
         "runtime": {
             "llama_version": capabilities.version,
@@ -224,37 +231,53 @@ def _flatten(page_metrics: Sequence[dict[str, Any]]) -> dict[str, float]:
     return {key: sum(float(item.get(key, 0.0) or 0.0) for item in page_metrics) for key in keys}
 
 
-def _run_document(stage: str, config: PipelineConfig, run_index: int, document: BenchmarkDocument, server_url: str, output_dir: Path, rss_mib: float | None) -> Observation:
+def _run_document(
+    stage: str,
+    config: PipelineConfig,
+    run_index: int,
+    document: BenchmarkDocument,
+    backend: BenchmarkLlamaServerBackend,
+    output_dir: Path,
+    warm_rss_mib: float | None,
+) -> Observation:
     started = time.perf_counter()
     pages: list[dict[str, Any]] = []
+    sampler = MemorySampler(backend.process_pid)
     try:
-        if document.is_pdf:
-            output, _ = ocr_pdf(
-                document.path,
-                server_url,
-                preprocessing_mode=config.preprocessing_mode,
-                emit_events=False,
-                prompt=config.prompt,
-                pdf_dpi=config.pdf_dpi,
-                max_image_dim=config.max_image_dim,
-                jpeg_quality=config.jpeg_quality,
-                cache_prompt=False,
-                page_metrics=pages,
-            )
-        else:
-            metrics: dict[str, Any] = {}
-            output, _ = ocr_single_image(
-                document.path,
-                server_url,
-                preprocessing_mode=config.preprocessing_mode,
-                prompt=config.prompt,
-                max_image_dim=config.max_image_dim,
-                jpeg_quality=config.jpeg_quality,
-                cache_prompt=False,
-                metrics=metrics,
-            )
-            pages.append(metrics)
+        with sampler:
+            if document.is_pdf:
+                output, _ = ocr_pdf(
+                    document.path,
+                    backend.server_url,
+                    preprocessing_mode=config.preprocessing_mode,
+                    emit_events=False,
+                    prompt=config.prompt,
+                    pdf_dpi=config.pdf_dpi,
+                    max_image_dim=config.max_image_dim,
+                    jpeg_quality=config.jpeg_quality,
+                    cache_prompt=False,
+                    page_metrics=pages,
+                )
+            else:
+                metrics: dict[str, Any] = {}
+                output, _ = ocr_single_image(
+                    document.path,
+                    backend.server_url,
+                    preprocessing_mode=config.preprocessing_mode,
+                    prompt=config.prompt,
+                    max_image_dim=config.max_image_dim,
+                    jpeg_quality=config.jpeg_quality,
+                    cache_prompt=False,
+                    metrics=metrics,
+                )
+                pages.append(metrics)
         elapsed = time.perf_counter() - started
+        observation_metrics = {
+            "pages": pages,
+            "totals": _flatten(pages),
+            "server_rss_mib": warm_rss_mib,
+            "memory": sampler.to_dict(),
+        }
         cer, wer, accuracy, segment_scores = score_document(document, output)
         path = output_dir / "outputs" / stage / config.name / document.level / f"run-{run_index:02d}.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,11 +292,204 @@ def _run_document(stage: str, config: PipelineConfig, run_index: int, document: 
             wer=wer,
             char_accuracy=accuracy,
             output_file=str(path.relative_to(output_dir)),
-            metrics={"pages": pages, "totals": _flatten(pages), "server_rss_mib": rss_mib},
+            metrics=observation_metrics,
             segment_scores=segment_scores,
         )
     except Exception as exc:
-        return Observation(stage, config.name, run_index, document.level, time.perf_counter() - started, None, None, None, "", {"pages": pages, "totals": _flatten(pages), "server_rss_mib": rss_mib}, {}, str(exc))
+        return Observation(
+            stage,
+            config.name,
+            run_index,
+            document.level,
+            time.perf_counter() - started,
+            None,
+            None,
+            None,
+            "",
+            {
+                "pages": pages,
+                "totals": _flatten(pages),
+                "server_rss_mib": warm_rss_mib,
+                "memory": sampler.to_dict(),
+            },
+            {},
+            str(exc),
+        )
+
+
+def _memory_cleanup_paths(documents: Sequence[BenchmarkDocument]) -> tuple[Path, ...]:
+    return tuple(benchmark_cache_paths()) + tuple(doc.path for doc in documents)
+
+
+def _settle_memory(paths: Sequence[Path], *, announce: bool = True) -> dict[str, Any]:
+    report = settle_benchmark_memory(paths)
+    stabilization = report.get("stabilization")
+    if announce and isinstance(stabilization, dict):
+        final = stabilization.get("final")
+        if isinstance(final, dict):
+            stable = "yes" if stabilization.get("stable") else "no"
+            print(
+                "  [memory] "
+                f"available={float(final['mem_available_mib']):.0f} MiB "
+                f"cached={float(final['cached_mib']):.0f} MiB "
+                f"stable={stable}"
+            )
+        elif stabilization.get("supported") is False:
+            print("  [memory] host telemetry unavailable; isolation is advisory only")
+        if stabilization.get("supported") and not stabilization.get("stable"):
+            print("  [memory] WARNING: host memory did not stabilize before timeout")
+    return report
+
+
+def _start_backend(
+    config: PipelineConfig,
+    output_dir: Path,
+    args: argparse.Namespace,
+    cleanup_paths: Sequence[Path],
+) -> tuple[BenchmarkLlamaServerBackend | None, float | None, str | None]:
+    startup_error: str | None = None
+    for attempt in range(args.max_retries + 1):
+        backend = BenchmarkLlamaServerBackend(config.runtime)
+        try:
+            backend.initialize()
+            ocr_single_image(
+                _make_warmup_image(output_dir),
+                backend.server_url,
+                preprocessing_mode="none",
+                prompt=config.prompt,
+                max_image_dim=min(config.max_image_dim, 1024),
+                jpeg_quality=config.jpeg_quality,
+                cache_prompt=False,
+            )
+            return backend, process_rss_mib(backend.process_pid), None
+        except KeyboardInterrupt:
+            backend.shutdown()
+            raise
+        except Exception as exc:
+            diagnostics = backend.failure_diagnostics()
+            suffix = " [suspected memory exhaustion]" if diagnostics.suspected_oom else ""
+            startup_error = f"{exc}{suffix}"
+            backend.shutdown()
+            if attempt < args.max_retries:
+                print(
+                    f"  [server] retry startup {attempt + 1}/{args.max_retries}: "
+                    f"{startup_error}"
+                )
+                _settle_memory(cleanup_paths, announce=False)
+                time.sleep(1.0)
+    return None, None, startup_error
+
+
+def _recovery_failure_class(
+    observation: Observation,
+    attempts: Sequence[dict[str, Any]],
+) -> str | None:
+    if not attempts:
+        return None
+    if observation.error is None:
+        return "recovered"
+    oom_failures = sum(
+        bool(item.get("server", {}).get("suspected_oom"))
+        for item in attempts
+        if isinstance(item.get("server"), dict)
+    )
+    process_exits = sum(
+        bool(item.get("server", {}).get("process_exited"))
+        for item in attempts
+        if isinstance(item.get("server"), dict)
+    )
+    clean_restarts = sum("memory_settle" in item for item in attempts)
+    if oom_failures >= 2 and clean_restarts >= 1:
+        return "resource_limit_confirmed"
+    if oom_failures:
+        return "resource_limit_suspected"
+    if process_exits:
+        return "server_crash"
+    return "request_error"
+
+
+def _run_document_with_recovery(
+    stage: str,
+    config: PipelineConfig,
+    run_index: int,
+    document: BenchmarkDocument,
+    backend: BenchmarkLlamaServerBackend,
+    warm_rss_mib: float | None,
+    output_dir: Path,
+    args: argparse.Namespace,
+    cleanup_paths: Sequence[Path],
+) -> tuple[Observation, BenchmarkLlamaServerBackend | None, float | None]:
+    attempts: list[dict[str, Any]] = []
+    observation: Observation | None = None
+    current_backend: BenchmarkLlamaServerBackend | None = backend
+    current_rss = warm_rss_mib
+    try:
+        for attempt in range(args.max_retries + 1):
+            assert current_backend is not None
+            observation = _run_document(
+                stage,
+                config,
+                run_index,
+                document,
+                current_backend,
+                output_dir,
+                current_rss,
+            )
+            if observation.error is None:
+                break
+
+            diagnostics = current_backend.failure_diagnostics()
+            attempt_record: dict[str, Any] = {
+                "attempt": attempt + 1,
+                "error": observation.error,
+                "server": diagnostics.to_dict(),
+                "memory": observation.metrics.get("memory"),
+            }
+            attempts.append(attempt_record)
+            if attempt >= args.max_retries:
+                break
+
+            if diagnostics.process_exited:
+                print(
+                    f"      {document.level}: server terminated; "
+                    f"clean restart {attempt + 1}/{args.max_retries}"
+                )
+                current_backend.shutdown()
+                settle_report = _settle_memory(cleanup_paths, announce=False)
+                attempt_record["memory_settle"] = settle_report
+                restarted, restarted_rss, restart_error = _start_backend(
+                    config,
+                    output_dir,
+                    args,
+                    cleanup_paths,
+                )
+                if restarted is None:
+                    attempt_record["restart_error"] = restart_error
+                    observation.error = (
+                        f"{observation.error}; server restart failed: {restart_error}"
+                    )
+                    current_backend = None
+                    break
+                current_backend = restarted
+                current_rss = restarted_rss
+            else:
+                print(
+                    f"      {document.level}: retry "
+                    f"{attempt + 1}/{args.max_retries}"
+                )
+
+        assert observation is not None
+        if attempts:
+            observation.metrics["runtime_recovery"] = {
+                "attempts": attempts,
+                "recovered": observation.error is None,
+                "failure_class": _recovery_failure_class(observation, attempts),
+            }
+        return observation, current_backend, current_rss
+    except BaseException:
+        if current_backend is not None:
+            current_backend.shutdown()
+        raise
 
 
 def _record_startup_failure(stage: str, config: PipelineConfig, levels: Sequence[str], target_runs: int, state: dict[str, Any], output_dir: Path, message: str) -> None:
@@ -284,7 +500,17 @@ def _record_startup_failure(stage: str, config: PipelineConfig, levels: Sequence
     _save_state(output_dir, state)
 
 
-def _run_config(stage: str, config: PipelineConfig, levels: Sequence[str], documents: Sequence[BenchmarkDocument], output_dir: Path, state: dict[str, Any], args: argparse.Namespace, *, target_runs: int = DEFAULT_RUNS) -> None:
+def _run_config(
+    stage: str,
+    config: PipelineConfig,
+    levels: Sequence[str],
+    documents: Sequence[BenchmarkDocument],
+    output_dir: Path,
+    state: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    target_runs: int = DEFAULT_RUNS,
+) -> None:
     pending = [
         (run_index, level)
         for run_index in range(1, target_runs + 1)
@@ -295,65 +521,117 @@ def _run_config(stage: str, config: PipelineConfig, levels: Sequence[str], docum
         print(f"  [skip] {config.name}: checkpoint completo ({target_runs} run)")
         return
 
-    backend: BenchmarkLlamaServerBackend | None = None
-    startup_error: Exception | None = None
-    for attempt in range(args.max_retries + 1):
-        try:
-            backend = BenchmarkLlamaServerBackend(config.runtime)
-            print(f"  [server] {config.name} · {config.runtime.signature()}")
-            backend.initialize()
-            break
-        except Exception as exc:
-            startup_error = exc
-            if backend is not None:
-                backend.shutdown()
-            backend = None
-            if attempt < args.max_retries:
-                print(f"  [server] retry startup {attempt + 1}/{args.max_retries}: {exc}")
-                time.sleep(1.0)
-    if backend is None:
-        message = f"runtime profile unavailable: {startup_error}"
-        print(f"  [server] FAIL: {message}")
-        _record_startup_failure(stage, config, levels, target_runs, state, output_dir, message)
-        return
-
     docs = {doc.level: doc for doc in documents}
+    cleanup_paths = _memory_cleanup_paths(documents)
+    backend: BenchmarkLlamaServerBackend | None = None
+    rss: float | None = None
+
+    _settle_memory(cleanup_paths)
+    print(f"  [server] {config.name} · {config.runtime.signature()}")
+
     try:
-        ocr_single_image(
-            _make_warmup_image(output_dir),
-            backend.server_url,
-            preprocessing_mode="none",
-            prompt=config.prompt,
-            max_image_dim=min(config.max_image_dim, 1024),
-            jpeg_quality=config.jpeg_quality,
-            cache_prompt=False,
+        backend, rss, startup_error = _start_backend(
+            config,
+            output_dir,
+            args,
+            cleanup_paths,
         )
-        rss = process_rss_mib(backend.process_pid)
+        if backend is None:
+            message = f"runtime profile unavailable: {startup_error}"
+            print(f"  [server] FAIL: {message}")
+            _record_startup_failure(stage, config, levels, target_runs, state, output_dir, message)
+            return
+
         for run_index in range(1, target_runs + 1):
             order = tuple(level for level in rotation_order(run_index) if level in levels)
             print(f"    run {run_index}/{target_runs}: {' -> '.join(order)}")
             for level in order:
                 if _successful(state, stage, config.name, run_index, level) is not None:
                     continue
-                observation: Observation | None = None
-                for attempt in range(args.max_retries + 1):
-                    observation = _run_document(stage, config, run_index, docs[level], backend.server_url, output_dir, rss)
-                    if observation.error is None:
-                        break
-                    if attempt < args.max_retries:
-                        print(f"      {level}: retry {attempt + 1}/{args.max_retries}")
-                assert observation is not None
+
+                if backend is None or not backend.is_server_running:
+                    if backend is not None:
+                        backend.shutdown()
+                    _settle_memory(cleanup_paths, announce=False)
+                    backend, rss, startup_error = _start_backend(
+                        config,
+                        output_dir,
+                        args,
+                        cleanup_paths,
+                    )
+                    if backend is None:
+                        observation = Observation(
+                            stage=stage,
+                            config_id=config.name,
+                            run_index=run_index,
+                            level=level,
+                            elapsed_s=0.0,
+                            cer=None,
+                            wer=None,
+                            char_accuracy=None,
+                            output_file="",
+                            metrics={
+                                "startup_failure": True,
+                                "failure_class": "server_restart_failed",
+                            },
+                            segment_scores={},
+                            error=f"server restart failed: {startup_error}",
+                        )
+                        _upsert(state, observation)
+                        _save_state(output_dir, state)
+                        print(f"      {level}: ERRORE {observation.error}")
+                        continue
+
+                observation, backend, rss = _run_document_with_recovery(
+                    stage,
+                    config,
+                    run_index,
+                    docs[level],
+                    backend,
+                    rss,
+                    output_dir,
+                    args,
+                    cleanup_paths,
+                )
                 _upsert(state, observation)
                 _save_state(output_dir, state)
                 if observation.error:
-                    print(f"      {level}: ERRORE {observation.error}")
+                    recovery = observation.metrics.get("runtime_recovery")
+                    failure_class = (
+                        recovery.get("failure_class")
+                        if isinstance(recovery, dict)
+                        else None
+                    )
+                    suffix = f" [{failure_class}]" if failure_class else ""
+                    print(f"      {level}: ERRORE {observation.error}{suffix}")
                 else:
-                    print(f"      {level}: acc={100 * float(observation.char_accuracy):.3f}% time={observation.elapsed_s:.2f}s cache_n={int(observation.metrics['totals']['cache_n'])}")
+                    memory = observation.metrics.get("memory")
+                    memory_suffix = ""
+                    if isinstance(memory, dict):
+                        minimum = memory.get("mem_available_min_mib")
+                        peak = memory.get("server_rss_peak_mib")
+                        if isinstance(minimum, (int, float)):
+                            memory_suffix += f" mem_avail_min={minimum:.0f}MiB"
+                        if isinstance(peak, (int, float)):
+                            memory_suffix += f" server_rss_peak={peak:.0f}MiB"
+                    print(
+                        f"      {level}: "
+                        f"acc={100 * float(observation.char_accuracy):.3f}% "
+                        f"time={observation.elapsed_s:.2f}s "
+                        f"cache_n={int(observation.metrics['totals']['cache_n'])}"
+                        f"{memory_suffix}"
+                    )
                     if level == "difficile":
-                        parts = " · ".join(f"{name}={100 * observation.segment_scores[name]['char_accuracy']:.2f}%" for name in HANDWRITING_SEGMENTS)
+                        parts = " · ".join(
+                            f"{name}="
+                            f"{100 * observation.segment_scores[name]['char_accuracy']:.2f}%"
+                            for name in HANDWRITING_SEGMENTS
+                        )
                         print(f"        {parts}")
     finally:
-        backend.shutdown()
+        if backend is not None:
+            backend.shutdown()
+        _settle_memory(cleanup_paths, announce=False)
 
 
 def _aggregate(state: dict[str, Any], config: PipelineConfig, levels: Sequence[str], run_count: int) -> ConfigAggregate:

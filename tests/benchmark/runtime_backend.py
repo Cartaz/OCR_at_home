@@ -11,6 +11,7 @@ import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from config.constants import AppMeta
@@ -22,11 +23,25 @@ from core.llama_backend import (
     LlamaServerBackend,
 )
 from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS, find_llama_server, venv_lib_env
+from core.llama_models import GGUF_CACHE_DIR, GGUF_MODEL_FILES
+from tests.benchmark.memory_guard import process_rss_mib
 
 CACHE_TYPES = ("f16", "bf16", "q8_0", "q5_0", "q4_0")
 FLASH_ATTN_VALUES = ("auto", "on", "off")
 SPEC_TYPES = ("none", "draft-mtp")
 BENCHMARK_BASELINE_CONTEXT_SIZE = 16384
+_OOM_MARKERS = (
+    "out of memory",
+    "cannot allocate memory",
+    "failed to allocate",
+    "allocation failed",
+    "std::bad_alloc",
+    "bad_alloc",
+    "ze_result_error_out_of_device_memory",
+    "ze_result_error_out_of_host_memory",
+    "ur_result_error_out_of_resources",
+    "insufficient memory",
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +130,21 @@ class RuntimeCapabilities:
     supported: dict[str, bool]
 
 
+@dataclass(frozen=True)
+class ServerFailureDiagnostics:
+    process_exited: bool
+    returncode: int | None
+    suspected_oom: bool
+    log_tail: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def benchmark_cache_paths() -> tuple[Path, ...]:
+    return tuple(GGUF_CACHE_DIR / filename for filename in GGUF_MODEL_FILES.values())
+
+
 def detect_runtime_capabilities() -> RuntimeCapabilities:
     server_path = find_llama_server()
     if not server_path:
@@ -201,12 +231,44 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
     def __init__(self, runtime: ServerRuntimeConfig) -> None:
         super().__init__()
         self.runtime = runtime.resolved()
+        self._benchmark_log_path: Path | None = None
+        self._benchmark_log_start_offset = 0
 
     @property
     def process_pid(self) -> int | None:
         with self._process_lock:
             process = self._process
         return None if process is None else int(process.pid)
+
+    def failure_diagnostics(self, *, tail_chars: int = 4000) -> ServerFailureDiagnostics:
+        with self._process_lock:
+            process = self._process
+            log_path = self._benchmark_log_path
+            log_start_offset = self._benchmark_log_start_offset
+
+        returncode = None if process is None else process.poll()
+        text = ""
+        if log_path is not None:
+            try:
+                size = log_path.stat().st_size
+                start = min(max(0, int(log_start_offset)), size)
+                with log_path.open("rb") as handle:
+                    handle.seek(start)
+                    text = handle.read().decode("utf-8", errors="replace")
+            except OSError:
+                text = ""
+
+        tail = text[-max(0, int(tail_chars)) :]
+        normalized = tail.casefold()
+        suspected_oom = returncode == -9 or any(
+            marker in normalized for marker in _OOM_MARKERS
+        )
+        return ServerFailureDiagnostics(
+            process_exited=process is None or returncode is not None,
+            returncode=returncode,
+            suspected_oom=suspected_oom,
+            log_tail=tail,
+        )
 
     def _start_server(
         self,
@@ -285,6 +347,7 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
         log_path = AppMeta.CONFIG_DIR / "llama-server-benchmark.log"
         if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
             log_path.unlink()
+        log_start_offset = log_path.stat().st_size if log_path.exists() else 0
 
         EventBus.emit(
             "model_load_progress",
@@ -314,6 +377,8 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
             self._process = process
             self._server_port = port
             self._server_url = url
+            self._benchmark_log_path = log_path
+            self._benchmark_log_start_offset = log_start_offset
 
         def stop_owned_process() -> None:
             self._stop_server()
@@ -344,16 +409,3 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
 
         self._stop_server()
         raise ModelLoadError("llama-server", "Profilo runtime non pronto entro 90 secondi")
-
-
-def process_rss_mib(pid: int | None) -> float | None:
-    if pid is None or os.name != "posix":
-        return None
-    try:
-        for line in open(f"/proc/{pid}/status", "r", encoding="utf-8"):
-            if line.startswith("VmRSS:"):
-                kib = float(line.split()[1])
-                return kib / 1024.0
-    except OSError:
-        return None
-    return None

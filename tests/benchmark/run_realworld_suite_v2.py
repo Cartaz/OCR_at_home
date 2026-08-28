@@ -53,6 +53,12 @@ from tests.benchmark.memory_guard import (  # noqa: E402
     process_rss_mib,
     settle_benchmark_memory,
 )
+from tests.benchmark.memory_guard import (  # noqa: E402
+    MEMORY_ISOLATION_VERSION,
+    MemorySampler,
+    process_rss_mib,
+    settle_benchmark_memory,
+)
 from tests.benchmark.realworld_suite_v2 import (  # noqa: E402
     BENCHMARK_SEED,
     DEFAULT_BEAM_WIDTH,
@@ -171,6 +177,7 @@ def _initial_state(inputs: dict[str, Any], args: argparse.Namespace, capabilitie
             "beam_width": args.beam_width,
             "seed": BENCHMARK_SEED,
             "cache_prompt": False,
+            "memory_isolation": MEMORY_ISOLATION_VERSION,
             "memory_isolation": MEMORY_ISOLATION_VERSION,
             "memory_isolation": MEMORY_ISOLATION_VERSION,
             "memory_isolation": MEMORY_ISOLATION_VERSION,

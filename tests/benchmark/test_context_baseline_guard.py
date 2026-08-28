@@ -34,8 +34,8 @@ def test_realworld_baseline_uses_16384_context_without_removing_smaller_candidat
     assert ServerRuntimeConfig().context_size == 4096
 
 
-def test_canonical_entrypoint_invalidates_pre_current_baseline_checkpoints() -> None:
+def test_canonical_entrypoint_invalidates_pre_memory_isolation_checkpoints() -> None:
     from tests.benchmark import run_realworld_suite  # noqa: F401
     from tests.benchmark import run_realworld_suite_v2 as runner
 
-    assert runner.CHECKPOINT_SCHEMA == 5
+    assert runner.CHECKPOINT_SCHEMA == 6

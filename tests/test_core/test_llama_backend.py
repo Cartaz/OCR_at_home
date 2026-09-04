@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from core.exceptions import ModelLoadError
-from core.llama_backend import LlamaServerBackend
+from config.constants import AppConstants
+from core.llama_backend import LlamaServerBackend, _production_runtime_args
 
 
 def test_generic_backend_is_rejected_before_startup() -> None:
@@ -40,3 +41,20 @@ def test_single_pdf_disables_whole_document_replay(monkeypatch, tmp_path: Path) 
         backend.process_image(pdf, mode="single")
 
     assert calls == 1
+
+
+def test_production_runtime_args_match_benchmark_selected_profile() -> None:
+    args = _production_runtime_args()
+    assert args == [
+        "-c", str(AppConstants.LLAMA_CONTEXT_SIZE),
+        "-b", str(AppConstants.LLAMA_BATCH_SIZE),
+        "-ub", str(AppConstants.LLAMA_UBATCH_SIZE),
+        "-t", str(AppConstants.LLAMA_THREADS),
+        "-tb", str(AppConstants.LLAMA_THREADS_BATCH),
+        "-fa", AppConstants.LLAMA_FLASH_ATTN,
+        "-ctk", AppConstants.LLAMA_CACHE_TYPE_K,
+        "-ctv", AppConstants.LLAMA_CACHE_TYPE_V,
+        "--spec-type", AppConstants.LLAMA_SPEC_TYPE,
+        "-kvo",
+        "--op-offload",
+    ]

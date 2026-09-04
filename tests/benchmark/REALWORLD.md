@@ -150,7 +150,11 @@ Variables intentionally not treated as OCR inference tuning include process prio
 
 Memory telemetry is sampled throughout every OCR request. Each observation records minimum host `MemAvailable`, minimum free RAM, peak cache, peak swap use, peak `llama-server` RSS and peak benchmark-harness RSS. This system-level signal is especially important on integrated GPUs, where GPU allocations compete with the host for the same physical RAM.
 
-If `llama-server` terminates during a request, the retry is never sent to the dead port. The runner captures exit/log diagnostics, shuts down the owned process group, performs targeted cache eviction and memory stabilization, starts the exact same runtime profile again, performs the non-corpus warm-up and retries the document. Repeated OOM-like termination after that clean restart is classified as `resource_limit_confirmed`; a single OOM-like termination is only `resource_limit_suspected`.
+Memory-isolation protocol v2 adds a hard safety floor of **256 MiB MemAvailable**. If the sampler crosses that floor, it terminates only the benchmark-owned `llama-server`; it never kills unrelated applications. The observation is classified `resource_limit_confirmed`, the whole configuration becomes terminal for that stage, memory is stabilized, and the beam search moves to the next candidate instead of repeating a configuration that is already outside the machine's usable resource envelope.
+
+If `llama-server` terminates for a non-memory reason, the retry is never sent to the dead port. The runner captures exit/log diagnostics, shuts down the owned process group, performs targeted cache eviction and memory stabilization, starts the exact same runtime profile again, performs the non-corpus warm-up and retries the document. Explicit OOM diagnostics are classified as resource limits; ordinary server crashes keep the existing single clean-restart recovery path.
+
+Resume is resource-aware: terminal failures are stored under `terminal_config_failures`. Existing schema-6 checkpoints created before protocol v2 are migrated lazily; an already failed observation whose recorded `MemAvailable` fell at or below the safety floor is promoted to a terminal resource limit and is not executed again. Successful historical observations are never retroactively invalidated.
 
 ## Quality gates
 
@@ -220,7 +224,7 @@ The benchmark checkpoints after every document. Resume with:
   --resume benchmark-results/realworld-v2-YYYYMMDD-HHMMSS
 ```
 
-All four input hashes are checked before continuing. Memory isolation is part of the canonical protocol and uses checkpoint schema **6**; older schema-5 checkpoints are deliberately rejected so measurements taken under different host-memory conditions are never mixed.
+All four input hashes are checked before continuing. Memory isolation is part of the canonical protocol and uses checkpoint schema **6**. Protocol v2 keeps schema 6 so existing v1 checkpoints remain resumable: the safety guard changes only handling of unsafe failures, while previously successful measurements keep their original data. Older schema-5 checkpoints are still rejected.
 
 The run can also be deliberately split:
 

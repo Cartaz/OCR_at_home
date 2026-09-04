@@ -23,16 +23,16 @@ from core.image_utils import array_to_pil, load_image, pdf_page_count, pdf_page_
 
 logger = logging.getLogger(__name__)
 
-# Keep the existing production default unchanged until the prompt benchmark has
-# been run on the target SYCL hardware. The task-specific values below are the
-# prompts defined by the official zai-org/GLM-OCR pipeline/training examples.
+# The canonical real-world benchmark selected the official text-recognition
+# task prompt for production on the target SYCL hardware. Other task prompts
+# remain explicit opt-ins for future table/formula workflows.
 PROMPT_LEGACY_OCR = "OCR"
 PROMPT_TEXT_RECOGNITION = "Text Recognition:"
 PROMPT_TABLE_RECOGNITION = "Table Recognition:"
 PROMPT_FORMULA_RECOGNITION = "Formula Recognition:"
-OCR_PROMPT = PROMPT_LEGACY_OCR
+OCR_PROMPT = PROMPT_TEXT_RECOGNITION
 
-PDF_DPI = 150
+PDF_DPI = AppConstants.LLAMA_PDF_DPI
 MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM
 JPEG_QUALITY = AppConstants.LLAMA_JPEG_QUALITY
 MAX_TOKENS = AppConstants.LLAMA_MAX_TOKENS

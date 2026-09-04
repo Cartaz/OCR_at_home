@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Sequence
 
+from config.constants import AppConstants
 from core.llama_ocr_api import PROMPT_LEGACY_OCR, PROMPT_TEXT_RECOGNITION
 from tests.benchmark.coherent_quality_reference import quality_reference
 from tests.benchmark.ground_truth_parser import load_ground_truth
@@ -32,7 +33,7 @@ from tests.benchmark.runtime_backend import (
 )
 
 CHECKPOINT_SCHEMA = 6
-BENCHMARK_BASELINE_MAX_IMAGE_DIM = 8192
+BENCHMARK_BASELINE_MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM
 
 
 def production_baseline(
@@ -40,7 +41,7 @@ def production_baseline(
     *,
     name: str = "baseline",
 ) -> PipelineConfig:
-    """Return the canonical production-like baseline used by the hardware suite."""
+    """Return the canonical production baseline used by the hardware suite."""
     return PipelineConfig(
         name=name,
         prompt=prompt,

@@ -10,8 +10,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-MEMORY_ISOLATION_VERSION = 1
-_DEFAULT_SAMPLE_INTERVAL_S = 0.20
+MEMORY_ISOLATION_VERSION = 2
+MEMORY_PRESSURE_FLOOR_MIB = 256.0
+_DEFAULT_SAMPLE_INTERVAL_S = 0.10
 _DEFAULT_SETTLE_TIMEOUT_S = 6.0
 _DEFAULT_SETTLE_INTERVAL_S = 0.20
 _DEFAULT_STABLE_SAMPLES = 3
@@ -112,10 +113,13 @@ class _MemorySample:
 
 
 class MemorySampler:
-    """Low-overhead sampler for one OCR request.
+    """Low-overhead sampler and hard host-memory safety guard for one OCR request.
 
     System memory is the primary signal on an integrated GPU because GPU
-    allocations compete with the host for the same physical RAM.
+    allocations compete with the host for the same physical RAM. When a
+    critical floor is configured, the callback is fired at most once so the
+    benchmark can stop only its owned llama-server before the OS starts killing
+    unrelated processes.
     """
 
     def __init__(
@@ -126,15 +130,27 @@ class MemorySampler:
         system_reader: Callable[[], SystemMemorySnapshot | None] = read_system_memory,
         rss_reader: Callable[[int | None], float | None] = process_rss_mib,
         harness_pid: int | None = None,
+        critical_available_mib: float | None = None,
+        on_critical: Callable[[SystemMemorySnapshot], None] | None = None,
     ) -> None:
         self._server_pid = server_pid
         self._harness_pid = os.getpid() if harness_pid is None else int(harness_pid)
         self._interval_s = max(0.05, float(interval_s))
         self._system_reader = system_reader
         self._rss_reader = rss_reader
+        self._critical_available_mib = (
+            None
+            if critical_available_mib is None
+            else max(0.0, float(critical_available_mib))
+        )
+        self._on_critical = on_critical
         self._samples: list[_MemorySample] = []
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._pressure_lock = threading.Lock()
+        self._pressure_triggered = False
+        self._pressure_snapshot: SystemMemorySnapshot | None = None
+        self._pressure_callback_error: str | None = None
 
     def _safe_system_read(self) -> SystemMemorySnapshot | None:
         try:
@@ -148,14 +164,42 @@ class MemorySampler:
         except Exception:
             return None
 
+    def _maybe_trigger_pressure_guard(
+        self,
+        snapshot: SystemMemorySnapshot | None,
+    ) -> None:
+        threshold = self._critical_available_mib
+        if (
+            snapshot is None
+            or threshold is None
+            or snapshot.mem_available_mib > threshold
+        ):
+            return
+
+        with self._pressure_lock:
+            if self._pressure_triggered:
+                return
+            self._pressure_triggered = True
+            self._pressure_snapshot = snapshot
+
+        callback = self._on_critical
+        if callback is None:
+            return
+        try:
+            callback(snapshot)
+        except Exception as exc:
+            self._pressure_callback_error = f"{type(exc).__name__}: {exc}"
+
     def sample_now(self) -> None:
+        system = self._safe_system_read()
         self._samples.append(
             _MemorySample(
-                system=self._safe_system_read(),
+                system=system,
                 server_rss_mib=self._safe_rss_read(self._server_pid),
                 harness_rss_mib=self._safe_rss_read(self._harness_pid),
             )
         )
+        self._maybe_trigger_pressure_guard(system)
 
     def _loop(self) -> None:
         while not self._stop_event.wait(self._interval_s):
@@ -225,6 +269,14 @@ class MemorySampler:
             ),
             "server_rss_peak_mib": max(server_rss) if server_rss else None,
             "harness_rss_peak_mib": max(harness_rss) if harness_rss else None,
+            "critical_available_mib": self._critical_available_mib,
+            "pressure_triggered": self._pressure_triggered,
+            "pressure_snapshot": (
+                self._pressure_snapshot.to_dict()
+                if self._pressure_snapshot is not None
+                else None
+            ),
+            "pressure_callback_error": self._pressure_callback_error,
         }
 
 

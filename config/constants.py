@@ -6,7 +6,7 @@ calcolati dinamicamente con pathlib.Path e variabili d'ambiente XDG.
 
 Classes:
     AppMeta: Metadati dell'applicazione.
-    OCRDefaults: Valori predefiniti per l'OCR.
+    OCRDefaults: Valori predefiniti per l'OCR e llama-server.
     UIConstraints: Vincoli e dimensioni dell'interfaccia.
 """
 
@@ -52,7 +52,12 @@ class AppMeta:
 
 
 class OCRDefaults:
-    """Valori predefiniti per l'OCR."""
+    """Valori predefiniti per OCR e runtime llama-server.
+
+    Il profilo llama-server deriva dal miglior profilo quality-first osservato
+    nel benchmark real-world v2 sul target SYCL corrente. Tenere qui i valori
+    evita che pipeline OCR e backend runtime divergano nel tempo.
+    """
 
     DEFAULT_OCR_LANGUAGE: str = "ita+eng"
     DEFAULT_CONFIDENCE_THRESHOLD: float = 0.5
@@ -61,9 +66,22 @@ class OCRDefaults:
     PREPROCESS_MAX_DIMENSION: int = 4096
 
     LLAMA_MAX_TOKENS: int = 4096
-    LLAMA_JPEG_QUALITY: int = 85
-    LLAMA_MAX_IMAGE_DIM: int = 1920
+    LLAMA_PDF_DPI: int = 150
+    LLAMA_JPEG_QUALITY: int = 80
+    LLAMA_MAX_IMAGE_DIM: int = 8192
     LLAMA_HTTP_TIMEOUT_S: int = 600
+
+    LLAMA_CONTEXT_SIZE: int = 16384
+    LLAMA_BATCH_SIZE: int = 1536
+    LLAMA_UBATCH_SIZE: int = 512
+    LLAMA_THREADS: int = 18
+    LLAMA_THREADS_BATCH: int = 16
+    LLAMA_FLASH_ATTN: str = "off"
+    LLAMA_CACHE_TYPE_K: str = "f16"
+    LLAMA_CACHE_TYPE_V: str = "f16"
+    LLAMA_SPEC_TYPE: str = "none"
+    LLAMA_KV_OFFLOAD: bool = True
+    LLAMA_OP_OFFLOAD: bool = True
 
     # ``llama-cpp`` resta come token legacy per migrare vecchi settings, ma
     # non è un device supportato dall'applicazione. GLM OCR è SYCL-only.
@@ -107,9 +125,22 @@ class AppConstants:
     PREPROCESS_MAX_DIMENSION = OCRDefaults.PREPROCESS_MAX_DIMENSION
 
     LLAMA_MAX_TOKENS = OCRDefaults.LLAMA_MAX_TOKENS
+    LLAMA_PDF_DPI = OCRDefaults.LLAMA_PDF_DPI
     LLAMA_JPEG_QUALITY = OCRDefaults.LLAMA_JPEG_QUALITY
     LLAMA_MAX_IMAGE_DIM = OCRDefaults.LLAMA_MAX_IMAGE_DIM
     LLAMA_HTTP_TIMEOUT_S = OCRDefaults.LLAMA_HTTP_TIMEOUT_S
+
+    LLAMA_CONTEXT_SIZE = OCRDefaults.LLAMA_CONTEXT_SIZE
+    LLAMA_BATCH_SIZE = OCRDefaults.LLAMA_BATCH_SIZE
+    LLAMA_UBATCH_SIZE = OCRDefaults.LLAMA_UBATCH_SIZE
+    LLAMA_THREADS = OCRDefaults.LLAMA_THREADS
+    LLAMA_THREADS_BATCH = OCRDefaults.LLAMA_THREADS_BATCH
+    LLAMA_FLASH_ATTN = OCRDefaults.LLAMA_FLASH_ATTN
+    LLAMA_CACHE_TYPE_K = OCRDefaults.LLAMA_CACHE_TYPE_K
+    LLAMA_CACHE_TYPE_V = OCRDefaults.LLAMA_CACHE_TYPE_V
+    LLAMA_SPEC_TYPE = OCRDefaults.LLAMA_SPEC_TYPE
+    LLAMA_KV_OFFLOAD = OCRDefaults.LLAMA_KV_OFFLOAD
+    LLAMA_OP_OFFLOAD = OCRDefaults.LLAMA_OP_OFFLOAD
 
     LLAMA_CPP_DEVICE = OCRDefaults.LLAMA_CPP_DEVICE
     LLAMA_CPP_SYCL_DEVICE = OCRDefaults.LLAMA_CPP_SYCL_DEVICE

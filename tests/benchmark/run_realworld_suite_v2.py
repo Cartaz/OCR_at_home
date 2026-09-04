@@ -37,6 +37,7 @@ from tests.benchmark.canonical_policy import (  # noqa: E402
 )
 from tests.benchmark.memory_guard import (  # noqa: E402
     MEMORY_ISOLATION_VERSION,
+    MEMORY_PRESSURE_FLOOR_MIB,
     MemorySampler,
     process_rss_mib,
     settle_benchmark_memory,
@@ -75,6 +76,9 @@ from tests.benchmark.runtime_backend import (  # noqa: E402
 )
 
 BORDERLINE_RUNS = 10
+RESOURCE_LIMIT_FAILURE_CLASSES = frozenset(
+    {"resource_limit_confirmed", "resource_limit_suspected"}
+)
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".gif"}
 
 
@@ -202,6 +206,105 @@ def _successful(state: dict[str, Any], stage: str, config_id: str, run_index: in
     return None
 
 
+def _memory_failure_class(memory: object) -> str | None:
+    if not isinstance(memory, dict):
+        return None
+    if bool(memory.get("pressure_triggered")):
+        return "resource_limit_confirmed"
+    minimum = memory.get("mem_available_min_mib")
+    if isinstance(minimum, (int, float)) and float(minimum) <= MEMORY_PRESSURE_FLOOR_MIB:
+        return "resource_limit_confirmed"
+    return None
+
+
+def _observation_failure_class(observation: Observation) -> str | None:
+    memory_class = _memory_failure_class(observation.metrics.get("memory"))
+    if memory_class is not None:
+        return memory_class
+
+    recovery = observation.metrics.get("runtime_recovery")
+    if isinstance(recovery, dict):
+        failure_class = recovery.get("failure_class")
+        if isinstance(failure_class, str) and failure_class:
+            return failure_class
+
+    direct = observation.metrics.get("failure_class")
+    return direct if isinstance(direct, str) and direct else None
+
+
+def _terminal_config_failure(
+    state: dict[str, Any],
+    stage: str,
+    config_id: str,
+) -> dict[str, Any] | None:
+    failures = state.get("terminal_config_failures")
+    if not isinstance(failures, dict):
+        return None
+    stage_failures = failures.get(stage)
+    if not isinstance(stage_failures, dict):
+        return None
+    payload = stage_failures.get(config_id)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _record_terminal_config_failure(
+    state: dict[str, Any],
+    stage: str,
+    config_id: str,
+    payload: dict[str, Any],
+) -> None:
+    failures = state.get("terminal_config_failures")
+    root = dict(failures) if isinstance(failures, dict) else {}
+    stage_failures = root.get(stage)
+    by_config = dict(stage_failures) if isinstance(stage_failures, dict) else {}
+    by_config[config_id] = dict(payload)
+    root[stage] = by_config
+    state["terminal_config_failures"] = root
+
+
+def _historical_resource_limit_failure(
+    state: dict[str, Any],
+    stage: str,
+    config_id: str,
+) -> dict[str, Any] | None:
+    for observation in reversed(_observations(state)):
+        if observation.stage != stage or observation.config_id != config_id:
+            continue
+        if observation.error is None:
+            continue
+        failure_class = _observation_failure_class(observation)
+        if failure_class not in RESOURCE_LIMIT_FAILURE_CLASSES:
+            continue
+        return {
+            "failure_class": failure_class,
+            "source": "historical_observation",
+            "run_index": observation.run_index,
+            "level": observation.level,
+            "error": observation.error,
+            "memory": observation.metrics.get("memory"),
+            "runtime_recovery": observation.metrics.get("runtime_recovery"),
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    return None
+
+
+def _attempt_failure_class(
+    observation: Observation,
+    diagnostics: object,
+) -> str:
+    memory_class = _memory_failure_class(observation.metrics.get("memory"))
+    if memory_class is not None:
+        return memory_class
+    if bool(getattr(diagnostics, "suspected_oom", False)):
+        return (
+            "resource_limit_confirmed"
+            if bool(getattr(diagnostics, "process_exited", False))
+            else "resource_limit_suspected"
+        )
+    if bool(getattr(diagnostics, "process_exited", False)):
+        return "server_crash"
+    return "request_error"
+
 def _upsert(state: dict[str, Any], observation: Observation) -> None:
     rows = list(state.get("observations", []))
     payload = observation_to_dict(observation)
@@ -242,7 +345,11 @@ def _run_document(
 ) -> Observation:
     started = time.perf_counter()
     pages: list[dict[str, Any]] = []
-    sampler = MemorySampler(backend.process_pid)
+    sampler = MemorySampler(
+        backend.process_pid,
+        critical_available_mib=MEMORY_PRESSURE_FLOOR_MIB,
+        on_critical=lambda _snapshot: backend.shutdown(),
+    )
     try:
         with sampler:
             if document.is_pdf:
@@ -388,24 +495,19 @@ def _recovery_failure_class(
         return None
     if observation.error is None:
         return "recovered"
-    oom_failures = sum(
-        bool(item.get("server", {}).get("suspected_oom"))
+
+    classes = [
+        str(item.get("failure_class"))
         for item in attempts
-        if isinstance(item.get("server"), dict)
-    )
-    process_exits = sum(
-        bool(item.get("server", {}).get("process_exited"))
-        for item in attempts
-        if isinstance(item.get("server"), dict)
-    )
-    clean_restarts = sum("memory_settle" in item for item in attempts)
-    if oom_failures >= 2 and clean_restarts >= 1:
+        if item.get("failure_class")
+    ]
+    if "resource_limit_confirmed" in classes:
         return "resource_limit_confirmed"
-    if oom_failures:
+    if "resource_limit_suspected" in classes:
         return "resource_limit_suspected"
-    if process_exits:
+    if "server_crash" in classes:
         return "server_crash"
-    return "request_error"
+    return classes[-1] if classes else "request_error"
 
 
 def _run_document_with_recovery(
@@ -435,17 +537,32 @@ def _run_document_with_recovery(
                 output_dir,
                 current_rss,
             )
-            if observation.error is None:
+
+            memory_class = _memory_failure_class(observation.metrics.get("memory"))
+            if observation.error is None and memory_class is None:
                 break
+            if observation.error is None and memory_class is not None:
+                observation.error = (
+                    "critical host memory pressure: "
+                    f"MemAvailable <= {MEMORY_PRESSURE_FLOOR_MIB:.0f} MiB"
+                )
 
             diagnostics = current_backend.failure_diagnostics()
+            failure_class = _attempt_failure_class(observation, diagnostics)
             attempt_record: dict[str, Any] = {
                 "attempt": attempt + 1,
                 "error": observation.error,
+                "failure_class": failure_class,
                 "server": diagnostics.to_dict(),
                 "memory": observation.metrics.get("memory"),
             }
             attempts.append(attempt_record)
+
+            # A resource-limit signal is terminal for this configuration. A
+            # second identical attempt only increases the chance that the host
+            # OOM killer terminates unrelated processes.
+            if failure_class in RESOURCE_LIMIT_FAILURE_CLASSES:
+                break
             if attempt >= args.max_retries:
                 break
 
@@ -511,6 +628,18 @@ def _run_config(
     *,
     target_runs: int = DEFAULT_RUNS,
 ) -> None:
+    terminal = _terminal_config_failure(state, stage, config.name)
+    if terminal is None:
+        historical = _historical_resource_limit_failure(state, stage, config.name)
+        if historical is not None:
+            _record_terminal_config_failure(state, stage, config.name, historical)
+            _save_state(output_dir, state)
+            terminal = historical
+    if terminal is not None:
+        failure_class = terminal.get("failure_class", "resource_limit")
+        print(f"  [skip] {config.name}: terminal {failure_class}")
+        return
+
     pending = [
         (run_index, level)
         for run_index in range(1, target_runs + 1)
@@ -540,6 +669,19 @@ def _run_config(
             message = f"runtime profile unavailable: {startup_error}"
             print(f"  [server] FAIL: {message}")
             _record_startup_failure(stage, config, levels, target_runs, state, output_dir, message)
+            if startup_error and "[suspected memory exhaustion]" in startup_error:
+                _record_terminal_config_failure(
+                    state,
+                    stage,
+                    config.name,
+                    {
+                        "failure_class": "resource_limit_suspected",
+                        "source": "startup",
+                        "error": startup_error,
+                        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+                _save_state(output_dir, state)
             return
 
         for run_index in range(1, target_runs + 1):
@@ -595,13 +737,36 @@ def _run_config(
                 )
                 _upsert(state, observation)
                 _save_state(output_dir, state)
-                if observation.error:
-                    recovery = observation.metrics.get("runtime_recovery")
-                    failure_class = (
-                        recovery.get("failure_class")
-                        if isinstance(recovery, dict)
-                        else None
+                failure_class = _observation_failure_class(observation)
+
+                if failure_class in RESOURCE_LIMIT_FAILURE_CLASSES:
+                    terminal_payload = {
+                        "failure_class": failure_class,
+                        "source": "current_observation",
+                        "run_index": run_index,
+                        "level": level,
+                        "error": observation.error,
+                        "memory": observation.metrics.get("memory"),
+                        "runtime_recovery": observation.metrics.get("runtime_recovery"),
+                        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    _record_terminal_config_failure(
+                        state,
+                        stage,
+                        config.name,
+                        terminal_payload,
                     )
+                    _save_state(output_dir, state)
+                    if backend is not None:
+                        backend.shutdown()
+                        backend = None
+                    print(
+                        f"      {level}: RESOURCE LIMIT [{failure_class}] — "
+                        "configurazione scartata"
+                    )
+                    return
+
+                if observation.error:
                     suffix = f" [{failure_class}]" if failure_class else ""
                     print(f"      {level}: ERRORE {observation.error}{suffix}")
                 else:
@@ -653,14 +818,34 @@ def _gate_and_retest(stage: str, configs: Sequence[PipelineConfig], levels: Sequ
     try:
         reference = quality_reference(initial)
     except ValueError:
-        return initial, {aggregate.config_id: {"status": "FAIL", "reasons": ["no valid cache-free configs"]} for aggregate in initial}
+        report: dict[str, Any] = {}
+        for aggregate in initial:
+            terminal = _terminal_config_failure(state, stage, aggregate.config_id)
+            report[aggregate.config_id] = {
+                "status": "FAIL",
+                "reasons": [
+                    str(terminal.get("failure_class"))
+                    if terminal is not None
+                    else "no valid cache-free configs"
+                ],
+                "runs": args.runs,
+                "terminal_failure": terminal,
+            }
+        return initial, report
+
     gates = {aggregate.config_id: classify_quality(aggregate, reference) for aggregate in initial}
-    borderline_ids = {config_id for config_id, gate in gates.items() if gate.status == "BORDERLINE"}
+    borderline_ids = {
+        config_id
+        for config_id, gate in gates.items()
+        if gate.status == "BORDERLINE"
+        and _terminal_config_failure(state, stage, config_id) is None
+    }
     if borderline_ids:
         print(f"  [quality] BORDERLINE -> altre 5 run: {sorted(borderline_ids)}")
         for config in configs:
             if config.name in borderline_ids:
                 _run_config(stage, config, levels, documents, output_dir, state, args, target_runs=BORDERLINE_RUNS)
+
     aggregates = [
         _aggregate(state, config, levels, BORDERLINE_RUNS if config.name in borderline_ids else args.runs)
         for config in configs
@@ -669,15 +854,31 @@ def _gate_and_retest(stage: str, configs: Sequence[PipelineConfig], levels: Sequ
         final_reference = quality_reference(aggregates)
         final_gates = {aggregate.config_id: classify_quality(aggregate, final_reference) for aggregate in aggregates}
     except ValueError:
-        final_gates = {aggregate.config_id: type("Gate", (), {"status": "FAIL", "reasons": ("no valid cache-free configs",)})() for aggregate in aggregates}
-    report = {
-        aggregate.config_id: {
+        final_gates = {
+            aggregate.config_id: type(
+                "Gate",
+                (),
+                {"status": "FAIL", "reasons": ("no valid cache-free configs",)},
+            )()
+            for aggregate in aggregates
+        }
+
+    report = {}
+    for aggregate in aggregates:
+        terminal = _terminal_config_failure(state, stage, aggregate.config_id)
+        if terminal is not None:
+            report[aggregate.config_id] = {
+                "status": "FAIL",
+                "reasons": [str(terminal.get("failure_class", "resource_limit"))],
+                "runs": BORDERLINE_RUNS if aggregate.config_id in borderline_ids else args.runs,
+                "terminal_failure": terminal,
+            }
+            continue
+        report[aggregate.config_id] = {
             "status": final_gates[aggregate.config_id].status,
             "reasons": list(final_gates[aggregate.config_id].reasons),
             "runs": BORDERLINE_RUNS if aggregate.config_id in borderline_ids else args.runs,
         }
-        for aggregate in aggregates
-    }
     return aggregates, report
 
 

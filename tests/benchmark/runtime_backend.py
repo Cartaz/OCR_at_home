@@ -1,8 +1,8 @@
 """Benchmark-only llama-server runtime tuning.
 
-Production ``LlamaServerBackend`` is intentionally untouched.  This module uses
-exactly the same SYCL runtime/model discovery and owned-process lifecycle, but
-lets the canonical hardware benchmark vary inference/runtime flags.
+This module reuses the production SYCL runtime/model discovery and owned-process
+lifecycle while allowing the canonical hardware benchmark to vary inference
+flags around the production profile defined in ``config.constants``.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from config.constants import AppMeta
+from config.constants import AppConstants, AppMeta
 from core.event_bus import EventBus
 from core.exceptions import ModelLoadError
 from core.llama_backend import (
@@ -29,7 +29,7 @@ from tests.benchmark.memory_guard import process_rss_mib
 CACHE_TYPES = ("f16", "bf16", "q8_0", "q5_0", "q4_0")
 FLASH_ATTN_VALUES = ("auto", "on", "off")
 SPEC_TYPES = ("none", "draft-mtp")
-BENCHMARK_BASELINE_CONTEXT_SIZE = 16384
+BENCHMARK_BASELINE_CONTEXT_SIZE = AppConstants.LLAMA_CONTEXT_SIZE
 _OOM_MARKERS = (
     "out of memory",
     "cannot allocate memory",
@@ -108,18 +108,19 @@ class ServerRuntimeConfig:
 
 
 def production_runtime_config() -> ServerRuntimeConfig:
-    """Return the production-like benchmark baseline with a safe context budget.
-
-    The application runtime remains untouched.  The real-world benchmark uses
-    a 16384-token context baseline so DPI/image sweeps cannot be rejected merely
-    because a long OCR transcription is truncated by the benchmark context.
-    Stage A still explicitly tests smaller context sizes.
-    """
-    optimal = LlamaServerBackend._optimal_thread_count()
+    """Return the canonical production runtime used as benchmark baseline."""
     return ServerRuntimeConfig(
-        context_size=BENCHMARK_BASELINE_CONTEXT_SIZE,
-        threads=optimal,
-        threads_batch=optimal,
+        context_size=AppConstants.LLAMA_CONTEXT_SIZE,
+        batch_size=AppConstants.LLAMA_BATCH_SIZE,
+        ubatch_size=AppConstants.LLAMA_UBATCH_SIZE,
+        threads=AppConstants.LLAMA_THREADS,
+        threads_batch=AppConstants.LLAMA_THREADS_BATCH,
+        flash_attn=AppConstants.LLAMA_FLASH_ATTN,
+        cache_type_k=AppConstants.LLAMA_CACHE_TYPE_K,
+        cache_type_v=AppConstants.LLAMA_CACHE_TYPE_V,
+        spec_type=AppConstants.LLAMA_SPEC_TYPE,
+        kv_offload=AppConstants.LLAMA_KV_OFFLOAD,
+        op_offload=AppConstants.LLAMA_OP_OFFLOAD,
     ).resolved()
 
 

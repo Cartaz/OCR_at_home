@@ -77,8 +77,8 @@ def test_pipeline_benchmark_defaults_are_uncapped_and_16k_only() -> None:
     assert BENCHMARK_MAX_IMAGE_DIM == 8192
     assert baseline.name == "baseline"
     assert baseline.max_image_dim == 8192
-    # Importing benchmark code must not change the production server default.
-    assert llama_backend.CONTEXT_SIZE == 4096
+    # Benchmark and production now share the canonical selected context.
+    assert llama_backend.CONTEXT_SIZE == 16384
 
 
 def test_realworld_benchmark_baseline_is_uncapped_and_16k_only() -> None:
@@ -86,9 +86,9 @@ def test_realworld_benchmark_baseline_is_uncapped_and_16k_only() -> None:
     assert canonical_policy.BENCHMARK_BASELINE_MAX_IMAGE_DIM == 8192
     assert baseline.max_image_dim == 8192
     assert baseline.runtime.context_size == 16384
-    # Canonical benchmark policy remains isolated from production defaults.
-    assert llama_backend.CONTEXT_SIZE == 4096
-    assert llama_ocr_api.MAX_IMAGE_DIM == 1920
+    # Canonical baseline reads the same production source of truth.
+    assert llama_backend.CONTEXT_SIZE == 16384
+    assert llama_ocr_api.MAX_IMAGE_DIM == 8192
 
 
 def test_full_preprocessing_mode_is_equivalent_to_production_enhance() -> None:

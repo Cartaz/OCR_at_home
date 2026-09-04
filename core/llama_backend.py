@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-from config.constants import AppMeta
+from config.constants import AppConstants, AppMeta
 from core.cancellation import CancellationToken
 from core.event_bus import EventBus
 from core.exceptions import ModelLoadError, OperationCancelledError
@@ -30,12 +30,38 @@ from core.models import OCRResult
 logger = logging.getLogger(__name__)
 
 LLAMA_SERVER_HOST = "127.0.0.1"
-CONTEXT_SIZE = 4096
-BATCH_SIZE = 1024
+# Compatibility aliases: canonical production values live in config.constants.
+CONTEXT_SIZE = AppConstants.LLAMA_CONTEXT_SIZE
+BATCH_SIZE = AppConstants.LLAMA_BATCH_SIZE
 N_PARALLEL = 1
 MAX_OCR_RETRIES = 1
 SYCL_DEVICE = "llama-cpp-sycl"
 
+
+def _production_runtime_args() -> list[str]:
+    """Return the benchmark-selected production runtime flags for llama-server."""
+    return [
+        "-c",
+        str(AppConstants.LLAMA_CONTEXT_SIZE),
+        "-b",
+        str(AppConstants.LLAMA_BATCH_SIZE),
+        "-ub",
+        str(AppConstants.LLAMA_UBATCH_SIZE),
+        "-t",
+        str(AppConstants.LLAMA_THREADS),
+        "-tb",
+        str(AppConstants.LLAMA_THREADS_BATCH),
+        "-fa",
+        AppConstants.LLAMA_FLASH_ATTN,
+        "-ctk",
+        AppConstants.LLAMA_CACHE_TYPE_K,
+        "-ctv",
+        AppConstants.LLAMA_CACHE_TYPE_V,
+        "--spec-type",
+        AppConstants.LLAMA_SPEC_TYPE,
+        "-kvo" if AppConstants.LLAMA_KV_OFFLOAD else "-nkvo",
+        "--op-offload" if AppConstants.LLAMA_OP_OFFLOAD else "--no-op-offload",
+    ]
 
 class LlamaServerBackend:
     """Gestisce esclusivamente un llama-server SYCL posseduto dall'app."""
@@ -197,12 +223,7 @@ class LlamaServerBackend:
             LLAMA_SERVER_HOST,
             "-ngl",
             str(GPU_OFFLOAD_ALL_LAYERS),
-            "-c",
-            str(CONTEXT_SIZE),
-            "-b",
-            str(BATCH_SIZE),
-            "-t",
-            str(self._optimal_thread_count()),
+            *_production_runtime_args(),
             "--parallel",
             str(N_PARALLEL),
             "--cache-ram",

@@ -10,9 +10,10 @@ from tests.benchmark.runtime_backend import (
 )
 
 
-def test_realworld_baseline_uses_16384_context_without_removing_smaller_candidates() -> None:
+def test_realworld_baseline_is_stock_without_removing_context_candidates() -> None:
     baseline = production_runtime_config()
-    assert baseline.context_size == 16384
+    assert baseline.context_size is None
+    assert baseline.cli_args() == []
 
     capabilities = RuntimeCapabilities(
         server_path="/tmp/llama-server",
@@ -29,13 +30,11 @@ def test_realworld_baseline_uses_16384_context_without_removing_smaller_candidat
         16384,
     ]
 
-    # The generic runtime profile remains neutral; only the canonical
-    # production-like benchmark baseline receives the larger safety budget.
-    assert ServerRuntimeConfig().context_size == 4096
+    assert ServerRuntimeConfig().context_size is None
 
 
-def test_canonical_entrypoint_invalidates_pre_memory_isolation_checkpoints() -> None:
+def test_canonical_entrypoint_uses_stock_baseline_checkpoint_schema() -> None:
     from tests.benchmark import run_realworld_suite  # noqa: F401
     from tests.benchmark import run_realworld_suite_v2 as runner
 
-    assert runner.CHECKPOINT_SCHEMA == 6
+    assert runner.CHECKPOINT_SCHEMA == 7

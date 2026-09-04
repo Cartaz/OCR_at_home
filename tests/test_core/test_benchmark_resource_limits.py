@@ -86,9 +86,9 @@ def _failed_observation(*, available_mib: float) -> Observation:
 def test_memory_sampler_triggers_owned_process_guard_once() -> None:
     readings = iter(
         (
-            _snapshot(1200.0, monotonic_s=0.0),
-            _snapshot(200.0, monotonic_s=0.1),
-            _snapshot(180.0, monotonic_s=0.2),
+            _snapshot(3000.0, monotonic_s=0.0),
+            _snapshot(1500.0, monotonic_s=0.1),
+            _snapshot(1400.0, monotonic_s=0.2),
         )
     )
     critical: list[float] = []
@@ -107,10 +107,10 @@ def test_memory_sampler_triggers_owned_process_guard_once() -> None:
     metrics = sampler.to_dict()
 
     assert MEMORY_ISOLATION_VERSION == 3
-    assert critical == [200.0]
+    assert critical == [1500.0]
     assert metrics["pressure_triggered"] is True
     assert metrics["critical_available_mib"] == MEMORY_PRESSURE_FLOOR_MIB
-    assert metrics["pressure_snapshot"]["mem_available_mib"] == 200.0
+    assert metrics["pressure_snapshot"]["mem_available_mib"] == 1500.0
 
 
 def test_low_memory_failure_is_terminal_without_retry(monkeypatch) -> None:

@@ -50,7 +50,7 @@ def _observation(*, error: str | None) -> Observation:
         wer=None if error else 0.02,
         char_accuracy=None if error else 0.99,
         output_file="",
-        metrics={"memory": {"mem_available_min_mib": 2048.0}},
+        metrics={"memory": {"mem_available_min_mib": 4096.0}},
         segment_scores={},
         error=error,
     )

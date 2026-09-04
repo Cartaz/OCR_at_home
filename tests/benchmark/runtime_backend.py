@@ -2,7 +2,8 @@
 
 This module reuses the production SYCL runtime/model discovery and owned-process
 lifecycle while allowing the canonical hardware benchmark to vary inference
-flags around the production profile defined in ``config.constants``.
+flags around a stock llama.cpp baseline. A ``None`` runtime field means the
+corresponding CLI flag is omitted and llama.cpp keeps its native default.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from config.constants import AppConstants, AppMeta
+from config.constants import AppMeta
 from core.event_bus import EventBus
 from core.exceptions import ModelLoadError
 from core.llama_backend import (
@@ -106,6 +107,7 @@ class ServerRuntimeConfig:
 
     def signature(self) -> str:
         r = self.resolved()
+
         def value(item: object) -> str:
             if item is None:
                 return "stock"

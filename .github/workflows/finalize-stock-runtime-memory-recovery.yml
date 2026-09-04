@@ -1,0 +1,102 @@
+name: finalize stock runtime memory recovery
+
+on:
+  push:
+    branches: [stock-runtime-memory-recovery]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stock-runtime-memory-recovery
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Final strategic cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/benchmark/runtime_backend.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''"""Benchmark-only llama-server runtime tuning.\n\nThis module reuses the production SYCL runtime/model discovery and owned-process\nlifecycle while allowing the canonical hardware benchmark to vary inference\nflags around the production profile defined in ``config.constants``.\n"""'''
+          new = '''"""Benchmark-only llama-server runtime tuning.\n\nThis module reuses the production SYCL runtime/model discovery and owned-process\nlifecycle while allowing the canonical hardware benchmark to vary inference\nflags around a stock llama.cpp baseline. A ``None`` runtime field means the\ncorresponding CLI flag is omitted and llama.cpp keeps its native default.\n"""'''
+          if old not in text:
+              raise SystemExit("runtime backend docstring marker not found")
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              "from config.constants import AppConstants, AppMeta\n",
+              "from config.constants import AppMeta\n",
+              1,
+          )
+          text = text.replace(
+              "        r = self.resolved()\n        def value(item: object) -> str:\n",
+              "        r = self.resolved()\n\n        def value(item: object) -> str:\n",
+              1,
+          )
+          path.write_text(text, encoding="utf-8")
+
+          memory = Path("tests/benchmark/memory_guard.py")
+          text = memory.read_text(encoding="utf-8")
+          marker = "MEMORY_PRESSURE_FLOOR_MIB = 1024.0"
+          if marker not in text:
+              raise SystemExit("memory pressure floor marker not found")
+          memory.write_text(
+              text.replace(marker, "MEMORY_PRESSURE_FLOOR_MIB = 2048.0", 1),
+              encoding="utf-8",
+          )
+
+          docs = Path("tests/benchmark/REALWORLD.md")
+          text = docs.read_text(encoding="utf-8")
+          text = text.replace(
+              "hard safety floor of **1024 MiB MemAvailable**",
+              "hard safety floor of **2048 MiB MemAvailable**",
+              1,
+          )
+          docs.write_text(text, encoding="utf-8")
+
+          test_path = Path("tests/test_core/test_owned_process.py")
+          test_path.write_text('''"""Linux integration tests for owned subprocess lifetime."""\n\nfrom __future__ import annotations\n\nimport os\nimport signal\nimport subprocess\nimport sys\nimport time\nfrom pathlib import Path\n\nimport pytest\n\n\ndef _process_is_running(pid: int) -> bool:\n    status = Path(f"/proc/{pid}/stat")\n    try:\n        fields = status.read_text(encoding="utf-8").split()\n    except OSError:\n        return False\n    return len(fields) > 2 and fields[2] != "Z"\n\n\n@pytest.mark.skipif(\n    os.name != "posix" or not sys.platform.startswith("linux"),\n    reason="PR_SET_PDEATHSIG is Linux-specific",\n)\ndef test_owned_child_dies_when_owner_is_sigkilled(tmp_path: Path) -> None:\n    pid_file = tmp_path / "owned-child.pid"\n    child_code = (\n        "import os,time; from pathlib import Path; "\n        f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "\n        "time.sleep(30)"\n    )\n    owner_code = f"""\nimport os\nimport sys\nimport time\nfrom core.owned_process import spawn_owned_process\n\nwith open(os.devnull, \"w\", encoding=\"utf-8\") as log:\n    spawn_owned_process(\n        [sys.executable, \"-c\", {child_code!r}],\n        stdout=log,\n        env=os.environ,\n    )\n    time.sleep(30)\n"""\n    owner = subprocess.Popen([sys.executable, "-c", owner_code])\n    child_pid: int | None = None\n    try:\n        deadline = time.monotonic() + 5.0\n        while time.monotonic() < deadline:\n            if pid_file.exists():\n                child_pid = int(pid_file.read_text(encoding="utf-8"))\n                break\n            if owner.poll() is not None:\n                pytest.fail(f"owner exited before child startup: {owner.returncode}")\n            time.sleep(0.05)\n        assert child_pid is not None, "owned child did not start"\n        assert _process_is_running(child_pid)\n\n        owner.send_signal(signal.SIGKILL)\n        owner.wait(timeout=3)\n\n        deadline = time.monotonic() + 5.0\n        while time.monotonic() < deadline and _process_is_running(child_pid):\n            time.sleep(0.05)\n        assert not _process_is_running(child_pid), (\n            "owned child survived an unexpected owner SIGKILL"\n        )\n    finally:\n        if owner.poll() is None:\n            owner.kill()\n            owner.wait(timeout=3)\n        if child_pid is not None and _process_is_running(child_pid):\n            os.kill(child_pid, signal.SIGKILL)\n''', encoding="utf-8")
+          PY
+
+          python -m compileall -q main.py config core ui tests
+          bash -n install.sh
+          bash -n PKGBUILD
+          python -m pytest -q
+          git diff --check
+
+      - name: Commit validated cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests
+          git commit -m "Validate stock runtime ownership and memory floor"
+          git push origin HEAD:stock-runtime-memory-recovery

@@ -1,0 +1,335 @@
+name: apply stock runtime and memory recovery
+
+on:
+  push:
+    branches: [stock-runtime-memory-recovery]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stock-runtime-memory-recovery
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply strategic runtime and memory changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"{path}: marker not found:\n{old[:300]}")
+              file.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # ------------------------------------------------------------------
+          # 1. Production: keep OCR pipeline defaults, but stop forcing tuned
+          #    llama.cpp runtime flags. The installed llama-server owns defaults.
+          # ------------------------------------------------------------------
+          replace_once(
+              "config/constants.py",
+              "    OCRDefaults: Valori predefiniti per l'OCR e llama-server.\n",
+              "    OCRDefaults: Valori predefiniti della pipeline OCR.\n",
+          )
+          replace_once(
+              "config/constants.py",
+              '''class OCRDefaults:\n    """Valori predefiniti per OCR e runtime llama-server.\n\n    Il profilo llama-server deriva dal miglior profilo quality-first osservato\n    nel benchmark real-world v2 sul target SYCL corrente. Tenere qui i valori\n    evita che pipeline OCR e backend runtime divergano nel tempo.\n    """\n''',
+              '''class OCRDefaults:\n    """Valori predefiniti della pipeline OCR.\n\n    I parametri di tuning di ``llama-server`` non vivono qui: la produzione\n    lascia al binario llama.cpp installato i suoi default nativi. Il benchmark\n    parte dalla stessa baseline stock e applica override solo ai candidati.\n    """\n''',
+          )
+          replace_once(
+              "config/constants.py",
+              '''    LLAMA_CONTEXT_SIZE: int = 16384\n    LLAMA_BATCH_SIZE: int = 1536\n    LLAMA_UBATCH_SIZE: int = 512\n    LLAMA_THREADS: int = 18\n    LLAMA_THREADS_BATCH: int = 16\n    LLAMA_FLASH_ATTN: str = "off"\n    LLAMA_CACHE_TYPE_K: str = "f16"\n    LLAMA_CACHE_TYPE_V: str = "f16"\n    LLAMA_SPEC_TYPE: str = "none"\n    LLAMA_KV_OFFLOAD: bool = True\n    LLAMA_OP_OFFLOAD: bool = True\n\n''',
+              "",
+          )
+          replace_once(
+              "config/constants.py",
+              '''    LLAMA_CONTEXT_SIZE = OCRDefaults.LLAMA_CONTEXT_SIZE\n    LLAMA_BATCH_SIZE = OCRDefaults.LLAMA_BATCH_SIZE\n    LLAMA_UBATCH_SIZE = OCRDefaults.LLAMA_UBATCH_SIZE\n    LLAMA_THREADS = OCRDefaults.LLAMA_THREADS\n    LLAMA_THREADS_BATCH = OCRDefaults.LLAMA_THREADS_BATCH\n    LLAMA_FLASH_ATTN = OCRDefaults.LLAMA_FLASH_ATTN\n    LLAMA_CACHE_TYPE_K = OCRDefaults.LLAMA_CACHE_TYPE_K\n    LLAMA_CACHE_TYPE_V = OCRDefaults.LLAMA_CACHE_TYPE_V\n    LLAMA_SPEC_TYPE = OCRDefaults.LLAMA_SPEC_TYPE\n    LLAMA_KV_OFFLOAD = OCRDefaults.LLAMA_KV_OFFLOAD\n    LLAMA_OP_OFFLOAD = OCRDefaults.LLAMA_OP_OFFLOAD\n\n''',
+              "",
+          )
+
+          Path("core/owned_process_exec.py").write_text('''"""Linux exec shim that binds an owned process to its Python parent."""\n\nfrom __future__ import annotations\n\nimport ctypes\nimport os\nimport signal\nimport sys\n\n_PR_SET_PDEATHSIG = 1\n\n\ndef _set_parent_death_signal() -> None:\n    libc = ctypes.CDLL(None, use_errno=True)\n    prctl = libc.prctl\n    prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]\n    prctl.restype = ctypes.c_int\n    if prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:\n        errno = ctypes.get_errno()\n        raise OSError(errno, os.strerror(errno))\n\n\ndef main(argv: list[str] | None = None) -> int:\n    args = list(sys.argv[1:] if argv is None else argv)\n    if len(args) < 3 or args[1] != "--":\n        raise SystemExit("usage: owned_process_exec.py <parent-pid> -- <command> [args...]")\n    expected_parent = int(args[0])\n    command = args[2:]\n    if not command:\n        raise SystemExit("owned command missing")\n\n    _set_parent_death_signal()\n    # Close the race where the owner dies between fork/exec and prctl().\n    if os.getppid() != expected_parent:\n        return 125\n    os.execvpe(command[0], command, os.environ)\n    return 127\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n''', encoding="utf-8")
+
+          Path("core/owned_process.py").write_text('''"""Owned subprocess lifecycle primitives.\n\nOn Linux a tiny exec shim installs ``PR_SET_PDEATHSIG`` before replacing itself\nwith the requested executable. This preserves the child PID/process group while\nensuring an app or benchmark killed with SIGKILL cannot orphan ``llama-server``.\n"""\n\nfrom __future__ import annotations\n\nimport os\nimport subprocess\nimport sys\nfrom dataclasses import dataclass\nfrom pathlib import Path\nfrom typing import Any, Mapping, Sequence, TextIO\n\n\n@dataclass(frozen=True)\nclass OwnedProcessHandle:\n    process: subprocess.Popen[Any]\n    process_group_id: int | None\n\n\ndef owned_process_argv(\n    command: Sequence[str],\n    *,\n    owner_pid: int | None = None,\n) -> list[str]:\n    argv = [str(item) for item in command]\n    if not argv:\n        raise ValueError("owned process command must not be empty")\n    if os.name != "posix" or not sys.platform.startswith("linux"):\n        return argv\n    wrapper = Path(__file__).with_name("owned_process_exec.py")\n    return [\n        sys.executable,\n        str(wrapper),\n        str(os.getpid() if owner_pid is None else int(owner_pid)),\n        "--",\n        *argv,\n    ]\n\n\ndef spawn_owned_process(\n    command: Sequence[str],\n    *,\n    stdout: TextIO,\n    env: Mapping[str, str],\n) -> OwnedProcessHandle:\n    process = subprocess.Popen(\n        owned_process_argv(command),\n        stdout=stdout,\n        stderr=subprocess.STDOUT,\n        env=dict(env),\n        start_new_session=(os.name == "posix"),\n    )\n    process_group_id: int | None = None\n    if os.name == "posix":\n        try:\n            process_group_id = os.getpgid(process.pid)\n        except ProcessLookupError:\n            process_group_id = None\n    return OwnedProcessHandle(process=process, process_group_id=process_group_id)\n''', encoding="utf-8")
+
+          replace_once(
+              "core/llama_backend.py",
+              "from config.constants import AppConstants, AppMeta\n",
+              "from config.constants import AppMeta\n",
+          )
+          replace_once(
+              "core/llama_backend.py",
+              "from core.llama_models import ensure_gguf_models\n",
+              "from core.llama_models import ensure_gguf_models\nfrom core.owned_process import spawn_owned_process\n",
+          )
+          replace_once(
+              "core/llama_backend.py",
+              '''# Compatibility aliases: canonical production values live in config.constants.\nCONTEXT_SIZE = AppConstants.LLAMA_CONTEXT_SIZE\nBATCH_SIZE = AppConstants.LLAMA_BATCH_SIZE\n''',
+              '''# ``None`` means: do not force a llama.cpp tuning value.\nCONTEXT_SIZE: None = None\nBATCH_SIZE: None = None\n''',
+          )
+          old_runtime_args = '''def _production_runtime_args() -> list[str]:\n    """Return the benchmark-selected production runtime flags for llama-server."""\n    return [\n        "-c",\n        str(AppConstants.LLAMA_CONTEXT_SIZE),\n        "-b",\n        str(AppConstants.LLAMA_BATCH_SIZE),\n        "-ub",\n        str(AppConstants.LLAMA_UBATCH_SIZE),\n        "-t",\n        str(AppConstants.LLAMA_THREADS),\n        "-tb",\n        str(AppConstants.LLAMA_THREADS_BATCH),\n        "-fa",\n        AppConstants.LLAMA_FLASH_ATTN,\n        "-ctk",\n        AppConstants.LLAMA_CACHE_TYPE_K,\n        "-ctv",\n        AppConstants.LLAMA_CACHE_TYPE_V,\n        "--spec-type",\n        AppConstants.LLAMA_SPEC_TYPE,\n        "-kvo" if AppConstants.LLAMA_KV_OFFLOAD else "-nkvo",\n        "--op-offload" if AppConstants.LLAMA_OP_OFFLOAD else "--no-op-offload",\n    ]\n'''
+          new_runtime_args = '''def _production_runtime_args() -> list[str]:\n    """Return no tuning overrides so llama-server uses its native defaults."""\n    return []\n'''
+          replace_once("core/llama_backend.py", old_runtime_args, new_runtime_args)
+          replace_once(
+              "core/llama_backend.py",
+              "        self._process: subprocess.Popen[Any] | None = None\n",
+              "        self._process: subprocess.Popen[Any] | None = None\n        self._process_group_id: int | None = None\n",
+          )
+          replace_once(
+              "core/llama_backend.py",
+              '''            "--parallel",\n            str(N_PARALLEL),\n            "--cache-ram",\n            "0",\n            "--metrics",\n''',
+              '''            "--parallel",\n            str(N_PARALLEL),\n            "--metrics",\n''',
+          )
+          replace_once(
+              "core/llama_backend.py",
+              '''            process = subprocess.Popen(\n                cmd,\n                stdout=log_file,\n                stderr=subprocess.STDOUT,\n                env=env,\n                start_new_session=(os.name == "posix"),\n            )\n''',
+              '''            handle = spawn_owned_process(cmd, stdout=log_file, env=env)\n            process = handle.process\n''',
+          )
+          replace_once(
+              "core/llama_backend.py",
+              '''            self._log_file = log_file\n            self._process = process\n            self._server_port = port\n''',
+              '''            self._log_file = log_file\n            self._process = process\n            self._process_group_id = handle.process_group_id\n            self._server_port = port\n''',
+          )
+          old_stop = '''    def _stop_server(self) -> None:\n        """Termina SOLO il process group creato da questa istanza."""\n        with self._process_lock:\n            process = self._process\n            log_file = self._log_file\n            self._process = None\n            self._log_file = None\n            self._server_url = ""\n            self._server_port = 0\n\n        if process is not None and process.poll() is None:\n            try:\n                if os.name == "posix":\n                    os.killpg(process.pid, signal.SIGTERM)\n                else:\n                    process.terminate()\n                process.wait(timeout=5)\n            except (ProcessLookupError, subprocess.TimeoutExpired):\n                try:\n                    if process.poll() is None:\n                        if os.name == "posix":\n                            os.killpg(process.pid, signal.SIGKILL)\n                        else:\n                            process.kill()\n                        process.wait(timeout=3)\n                except Exception:\n                    pass\n            except Exception as exc:\n                logger.warning("Errore arresto llama-server: %s", exc)\n\n        if log_file is not None:\n            try:\n                log_file.close()\n            except Exception:\n                pass\n'''
+          new_stop = '''    def _stop_server(self) -> None:\n        """Terminate only this instance's owned process group, idempotently."""\n        with self._process_lock:\n            process = self._process\n            process_group_id = self._process_group_id\n            log_file = self._log_file\n            self._process = None\n            self._process_group_id = None\n            self._log_file = None\n            self._server_url = ""\n            self._server_port = 0\n\n        if process is not None:\n            try:\n                if os.name == "posix" and process_group_id is not None:\n                    # Signal the group even when the leader already exited: this\n                    # also removes surviving helper children instead of orphaning them.\n                    os.killpg(process_group_id, signal.SIGTERM)\n                elif process.poll() is None:\n                    process.terminate()\n                process.wait(timeout=5)\n            except ProcessLookupError:\n                pass\n            except subprocess.TimeoutExpired:\n                try:\n                    if os.name == "posix" and process_group_id is not None:\n                        os.killpg(process_group_id, signal.SIGKILL)\n                    elif process.poll() is None:\n                        process.kill()\n                    process.wait(timeout=3)\n                except (ProcessLookupError, subprocess.TimeoutExpired):\n                    pass\n            except Exception as exc:\n                logger.warning("Errore arresto llama-server: %s", exc)\n\n        if log_file is not None:\n            try:\n                log_file.close()\n            except Exception:\n                pass\n'''
+          replace_once("core/llama_backend.py", old_stop, new_stop)
+
+          # ------------------------------------------------------------------
+          # 2. Benchmark runtime: None means native llama.cpp stock setting.
+          # ------------------------------------------------------------------
+          replace_once(
+              "tests/benchmark/runtime_backend.py",
+              "from core.llama_models import GGUF_CACHE_DIR, GGUF_MODEL_FILES\n",
+              "from core.llama_models import GGUF_CACHE_DIR, GGUF_MODEL_FILES\nfrom core.owned_process import spawn_owned_process\n",
+          )
+          replace_once(
+              "tests/benchmark/runtime_backend.py",
+              "BENCHMARK_BASELINE_CONTEXT_SIZE = AppConstants.LLAMA_CONTEXT_SIZE\n",
+              "BENCHMARK_BASELINE_CONTEXT_SIZE: None = None\n",
+          )
+          start = Path("tests/benchmark/runtime_backend.py").read_text(encoding="utf-8")
+          block_start = start.index("@dataclass(frozen=True)\nclass ServerRuntimeConfig:")
+          block_end = start.index("@dataclass(frozen=True)\nclass RuntimeCapabilities:")
+          runtime_block = '''@dataclass(frozen=True)\nclass ServerRuntimeConfig:\n    """Explicit llama-server overrides; ``None`` preserves the stock value."""\n\n    context_size: int | None = None\n    batch_size: int | None = None\n    ubatch_size: int | None = None\n    threads: int | None = None\n    threads_batch: int | None = None\n    flash_attn: str | None = None\n    cache_type_k: str | None = None\n    cache_type_v: str | None = None\n    spec_type: str | None = None\n    kv_offload: bool | None = None\n    op_offload: bool | None = None\n\n    def resolved(self) -> "ServerRuntimeConfig":\n        result = ServerRuntimeConfig(\n            context_size=None if self.context_size is None else int(self.context_size),\n            batch_size=None if self.batch_size is None else int(self.batch_size),\n            ubatch_size=None if self.ubatch_size is None else int(self.ubatch_size),\n            threads=None if self.threads is None else int(self.threads),\n            threads_batch=None if self.threads_batch is None else int(self.threads_batch),\n            flash_attn=None if self.flash_attn is None else str(self.flash_attn).lower(),\n            cache_type_k=None if self.cache_type_k is None else str(self.cache_type_k).lower(),\n            cache_type_v=None if self.cache_type_v is None else str(self.cache_type_v).lower(),\n            spec_type=None if self.spec_type is None else str(self.spec_type).lower(),\n            kv_offload=None if self.kv_offload is None else bool(self.kv_offload),\n            op_offload=None if self.op_offload is None else bool(self.op_offload),\n        )\n        result.validate()\n        return result\n\n    def validate(self) -> None:\n        if self.context_size is not None and not 1024 <= self.context_size <= 32768:\n            raise ValueError("context_size fuori range 1024..32768")\n        if self.batch_size is not None and not 32 <= self.batch_size <= 8192:\n            raise ValueError("batch_size fuori range 32..8192")\n        if self.ubatch_size is not None and self.ubatch_size < 32:\n            raise ValueError("ubatch_size deve essere >= 32")\n        if (\n            self.ubatch_size is not None\n            and self.batch_size is not None\n            and self.ubatch_size > self.batch_size\n        ):\n            raise ValueError("ubatch_size deve essere <= batch_size quando entrambi sono espliciti")\n        if self.threads is not None and self.threads < 1:\n            raise ValueError("threads deve essere >= 1")\n        if self.threads_batch is not None and self.threads_batch < 1:\n            raise ValueError("threads_batch deve essere >= 1")\n        if self.flash_attn is not None and self.flash_attn not in FLASH_ATTN_VALUES:\n            raise ValueError(f"flash_attn non valido: {self.flash_attn}")\n        if self.cache_type_k is not None and self.cache_type_k not in CACHE_TYPES:\n            raise ValueError("tipo KV cache K non supportato dalla suite")\n        if self.cache_type_v is not None and self.cache_type_v not in CACHE_TYPES:\n            raise ValueError("tipo KV cache V non supportato dalla suite")\n        if self.spec_type is not None and self.spec_type not in SPEC_TYPES:\n            raise ValueError(f"spec_type non valido: {self.spec_type}")\n\n    def signature(self) -> str:\n        r = self.resolved()\n        def value(item: object) -> str:\n            if item is None:\n                return "stock"\n            if isinstance(item, bool):\n                return str(int(item))\n            return str(item)\n        return (\n            f"ctx{value(r.context_size)}-b{value(r.batch_size)}-ub{value(r.ubatch_size)}-"\n            f"t{value(r.threads)}-tb{value(r.threads_batch)}-fa{value(r.flash_attn)}-"\n            f"k{value(r.cache_type_k)}-v{value(r.cache_type_v)}-spec{value(r.spec_type)}-"\n            f"kvo{value(r.kv_offload)}-opo{value(r.op_offload)}"\n        )\n\n    def to_dict(self) -> dict[str, Any]:\n        return asdict(self.resolved())\n\n    def cli_args(self) -> list[str]:\n        r = self.resolved()\n        args: list[str] = []\n        scalar = (\n            ("-c", r.context_size),\n            ("-b", r.batch_size),\n            ("-ub", r.ubatch_size),\n            ("-t", r.threads),\n            ("-tb", r.threads_batch),\n            ("-fa", r.flash_attn),\n            ("-ctk", r.cache_type_k),\n            ("-ctv", r.cache_type_v),\n            ("--spec-type", r.spec_type),\n        )\n        for flag, item in scalar:\n            if item is not None:\n                args.extend((flag, str(item)))\n        if r.kv_offload is not None:\n            args.append("-kvo" if r.kv_offload else "-nkvo")\n        if r.op_offload is not None:\n            args.append("--op-offload" if r.op_offload else "--no-op-offload")\n        return args\n\n\ndef stock_runtime_config() -> ServerRuntimeConfig:\n    """Return a baseline with no tunable llama.cpp CLI overrides."""\n    return ServerRuntimeConfig().resolved()\n\n\ndef production_runtime_config() -> ServerRuntimeConfig:\n    """Compatibility alias: production now intentionally uses stock runtime values."""\n    return stock_runtime_config()\n\n\n'''
+          Path("tests/benchmark/runtime_backend.py").write_text(
+              start[:block_start] + runtime_block + start[block_end:],
+              encoding="utf-8",
+          )
+          replace_once(
+              "tests/benchmark/runtime_backend.py",
+              '''            "-c",\n            str(runtime.context_size),\n            "-b",\n            str(runtime.batch_size),\n            "-ub",\n            str(runtime.ubatch_size),\n            "-t",\n            str(runtime.threads),\n            "-tb",\n            str(runtime.threads_batch),\n            "--parallel",\n            str(N_PARALLEL),\n            "--cache-ram",\n            "0",\n            "--metrics",\n            "-fa",\n            runtime.flash_attn,\n            "-ctk",\n            runtime.cache_type_k,\n            "-ctv",\n            runtime.cache_type_v,\n            "--spec-type",\n            runtime.spec_type,\n            "-kvo" if runtime.kv_offload else "-nkvo",\n            "--op-offload" if runtime.op_offload else "--no-op-offload",\n''',
+              '''            *runtime.cli_args(),\n            "--parallel",\n            str(N_PARALLEL),\n            "--metrics",\n''',
+          )
+          replace_once(
+              "tests/benchmark/runtime_backend.py",
+              '''            process = subprocess.Popen(\n                cmd,\n                stdout=log_file,\n                stderr=subprocess.STDOUT,\n                env=env,\n                start_new_session=(os.name == "posix"),\n            )\n''',
+              '''            handle = spawn_owned_process(cmd, stdout=log_file, env=env)\n            process = handle.process\n''',
+          )
+          replace_once(
+              "tests/benchmark/runtime_backend.py",
+              '''            self._log_file = log_file\n            self._process = process\n            self._server_port = port\n''',
+              '''            self._log_file = log_file\n            self._process = process\n            self._process_group_id = handle.process_group_id\n            self._server_port = port\n''',
+          )
+
+          # Benchmark baseline must be actual stock runtime, not the last machine's winner.
+          replace_once(
+              "tests/benchmark/canonical_policy.py",
+              "from config.constants import AppConstants\n",
+              "",
+          )
+          replace_once(
+              "tests/benchmark/canonical_policy.py",
+              '''    production_runtime_config,\n''',
+              '''    stock_runtime_config,\n''',
+          )
+          replace_once(
+              "tests/benchmark/canonical_policy.py",
+              "CHECKPOINT_SCHEMA = 6\nBENCHMARK_BASELINE_MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM\n",
+              "CHECKPOINT_SCHEMA = 7\nBENCHMARK_BASELINE_MAX_IMAGE_DIM = 8192\n",
+          )
+          replace_once(
+              "tests/benchmark/canonical_policy.py",
+              "        runtime=production_runtime_config(),\n",
+              "        runtime=stock_runtime_config(),\n",
+          )
+          replace_once(
+              "tests/benchmark/canonical_policy.py",
+              '    """Return the canonical production baseline used by the hardware suite."""\n',
+              '    """Return the stock llama.cpp runtime baseline used by the hardware suite."""\n',
+          )
+
+          # Keep pure helper defaults consistent as well.
+          replace_once(
+              "tests/benchmark/realworld_suite_v2.py",
+              "    production_runtime_config,\n",
+              "    stock_runtime_config,\n",
+          )
+          replace_once(
+              "tests/benchmark/realworld_suite_v2.py",
+              "    runtime: ServerRuntimeConfig = field(default_factory=production_runtime_config)\n",
+              "    runtime: ServerRuntimeConfig = field(default_factory=stock_runtime_config)\n",
+          )
+          replace_once(
+              "tests/benchmark/realworld_suite_v2.py",
+              "    return PipelineConfig(name=name, prompt=prompt, runtime=production_runtime_config())\n",
+              "    return PipelineConfig(name=name, prompt=prompt, runtime=stock_runtime_config())\n",
+          )
+
+          # ------------------------------------------------------------------
+          # 3. Memory recovery: stability is not recovery. Add bounded recovery
+          #    to launch baseline + malloc_trim, and use an earlier safety floor.
+          # ------------------------------------------------------------------
+          replace_once("tests/benchmark/memory_guard.py", "import gc\n", "import ctypes\nimport gc\n")
+          replace_once(
+              "tests/benchmark/memory_guard.py",
+              '''MEMORY_ISOLATION_VERSION = 2\nMEMORY_PRESSURE_FLOOR_MIB = 256.0\n_DEFAULT_SAMPLE_INTERVAL_S = 0.10\n''',
+              '''MEMORY_ISOLATION_VERSION = 3\nMEMORY_PRESSURE_FLOOR_MIB = 1024.0\nMEMORY_RECOVERY_MIN_TOLERANCE_MIB = 512.0\nMEMORY_RECOVERY_FRACTION = 0.05\n_DEFAULT_RECOVERY_TIMEOUT_S = 30.0\n_DEFAULT_SAMPLE_INTERVAL_S = 0.10\n''',
+          )
+          marker = "@dataclass(frozen=True)\nclass CacheEvictionReport:"
+          insert = '''def trim_process_heap() -> bool:\n    """Ask glibc to return free allocator arenas after Python/C-extension cleanup."""\n    gc.collect()\n    if os.name != "posix":\n        return False\n    try:\n        libc = ctypes.CDLL(None)\n        malloc_trim = getattr(libc, "malloc_trim")\n        malloc_trim.argtypes = [ctypes.c_size_t]\n        malloc_trim.restype = ctypes.c_int\n        return bool(malloc_trim(0))\n    except (AttributeError, OSError):\n        return False\n\n\ndef memory_recovery_tolerance_mib(mem_total_mib: float) -> float:\n    return max(\n        MEMORY_RECOVERY_MIN_TOLERANCE_MIB,\n        max(0.0, float(mem_total_mib)) * MEMORY_RECOVERY_FRACTION,\n    )\n\n\n'''
+          replace_once("tests/benchmark/memory_guard.py", marker, insert + marker)
+
+          marker2 = "def wait_for_memory_stable(\n"
+          recovery_block = '''@dataclass(frozen=True)\nclass MemoryRecoveryReport:\n    supported: bool\n    recovered: bool\n    stable: bool\n    elapsed_s: float\n    sample_count: int\n    target_available_mib: float\n    tolerance_mib: float\n    threshold_available_mib: float\n    available_spread_mib: float | None\n    final: SystemMemorySnapshot | None\n\n    def to_dict(self) -> dict[str, object]:\n        return {\n            "supported": self.supported,\n            "recovered": self.recovered,\n            "stable": self.stable,\n            "elapsed_s": self.elapsed_s,\n            "sample_count": self.sample_count,\n            "target_available_mib": self.target_available_mib,\n            "tolerance_mib": self.tolerance_mib,\n            "threshold_available_mib": self.threshold_available_mib,\n            "available_spread_mib": self.available_spread_mib,\n            "final": self.final.to_dict() if self.final is not None else None,\n        }\n\n\ndef wait_for_memory_recovery(\n    target_available_mib: float,\n    *,\n    timeout_s: float = _DEFAULT_RECOVERY_TIMEOUT_S,\n    interval_s: float = _DEFAULT_SETTLE_INTERVAL_S,\n    stable_samples: int = _DEFAULT_STABLE_SAMPLES,\n    stable_tolerance_mib: float = _DEFAULT_STABLE_TOLERANCE_MIB,\n    recovery_tolerance_mib: float | None = None,\n    snapshot_reader: Callable[[], SystemMemorySnapshot | None] = read_system_memory,\n    sleep: Callable[[float], None] = time.sleep,\n    clock: Callable[[], float] = time.monotonic,\n) -> MemoryRecoveryReport:\n    target = max(0.0, float(target_available_mib))\n    timeout_s = max(0.0, float(timeout_s))\n    interval_s = max(0.0, float(interval_s))\n    stable_samples = max(2, int(stable_samples))\n    stable_tolerance_mib = max(0.0, float(stable_tolerance_mib))\n    started = clock()\n    recent: list[SystemMemorySnapshot] = []\n    total_samples = 0\n    tolerance: float | None = None\n\n    while True:\n        snapshot = snapshot_reader()\n        if snapshot is None:\n            return MemoryRecoveryReport(\n                False, True, True, max(0.0, clock() - started), total_samples,\n                target, 0.0, target, None, None,\n            )\n        total_samples += 1\n        if tolerance is None:\n            tolerance = (\n                memory_recovery_tolerance_mib(snapshot.mem_total_mib)\n                if recovery_tolerance_mib is None\n                else max(0.0, float(recovery_tolerance_mib))\n            )\n        threshold = max(0.0, target - tolerance)\n        recent.append(snapshot)\n        if len(recent) > stable_samples:\n            recent.pop(0)\n\n        spread: float | None = None\n        stable = False\n        recovered = False\n        if len(recent) == stable_samples:\n            values = [item.mem_available_mib for item in recent]\n            spread = max(values) - min(values)\n            stable = spread <= stable_tolerance_mib\n            recovered = stable and min(values) >= threshold\n            if recovered:\n                return MemoryRecoveryReport(\n                    True, True, True, max(0.0, clock() - started), total_samples,\n                    target, tolerance, threshold, spread, snapshot,\n                )\n\n        if clock() - started >= timeout_s:\n            return MemoryRecoveryReport(\n                True, False, stable, max(0.0, clock() - started), total_samples,\n                target, tolerance, threshold, spread, snapshot,\n            )\n        sleep(interval_s)\n\n\n'''
+          replace_once("tests/benchmark/memory_guard.py", marker2, recovery_block + marker2)
+
+          old_settle = '''def settle_benchmark_memory(\n    paths: Sequence[Path],\n    *,\n    timeout_s: float = _DEFAULT_SETTLE_TIMEOUT_S,\n) -> dict[str, object]:\n    """Release benchmark-owned cache pressure and wait for host RAM to settle."""\n\n    gc.collect()\n    eviction = evict_file_cache(paths)\n    stabilization = wait_for_memory_stable(timeout_s=timeout_s)\n    return {\n        "memory_isolation_version": MEMORY_ISOLATION_VERSION,\n        "cache_eviction": eviction.to_dict(),\n        "stabilization": stabilization.to_dict(),\n    }\n'''
+          new_settle = '''def settle_benchmark_memory(\n    paths: Sequence[Path],\n    *,\n    timeout_s: float = _DEFAULT_SETTLE_TIMEOUT_S,\n    target_available_mib: float | None = None,\n    recovery_timeout_s: float = _DEFAULT_RECOVERY_TIMEOUT_S,\n) -> dict[str, object]:\n    """Release owned pressure and either stabilize or recover to session baseline."""\n\n    heap_trimmed = trim_process_heap()\n    eviction = evict_file_cache(paths)\n    recovery: MemoryRecoveryReport | None = None\n    if target_available_mib is None:\n        stabilization = wait_for_memory_stable(timeout_s=timeout_s)\n    else:\n        recovery = wait_for_memory_recovery(\n            target_available_mib,\n            timeout_s=recovery_timeout_s,\n        )\n        stabilization = MemoryStabilizationReport(\n            supported=recovery.supported,\n            stable=recovery.stable,\n            elapsed_s=recovery.elapsed_s,\n            sample_count=recovery.sample_count,\n            available_spread_mib=recovery.available_spread_mib,\n            final=recovery.final,\n        )\n    return {\n        "memory_isolation_version": MEMORY_ISOLATION_VERSION,\n        "heap_trimmed": heap_trimmed,\n        "cache_eviction": eviction.to_dict(),\n        "stabilization": stabilization.to_dict(),\n        "recovery": recovery.to_dict() if recovery is not None else None,\n    }\n'''
+          replace_once("tests/benchmark/memory_guard.py", old_settle, new_settle)
+
+          # Runner: enforce recovery to the invocation baseline between profiles.
+          replace_once(
+              "tests/benchmark/run_realworld_suite_v2.py",
+              "SUPPORTED_EXTENSIONS = {\".pdf\", \".png\", \".jpg\", \".jpeg\", \".bmp\", \".tiff\", \".tif\", \".webp\", \".gif\"}\n\n\n",
+              '''SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".gif"}\n\n\nclass MemoryRecoveryError(RuntimeError):\n    """The host did not return close enough to the invocation memory baseline."""\n\n\n''',
+          )
+          old_settle_runner = '''def _settle_memory(paths: Sequence[Path], *, announce: bool = True) -> dict[str, Any]:\n    report = settle_benchmark_memory(paths)\n    stabilization = report.get("stabilization")\n    if announce and isinstance(stabilization, dict):\n        final = stabilization.get("final")\n        if isinstance(final, dict):\n            stable = "yes" if stabilization.get("stable") else "no"\n            print(\n                "  [memory] "\n                f"available={float(final['mem_available_mib']):.0f} MiB "\n                f"cached={float(final['cached_mib']):.0f} MiB "\n                f"stable={stable}"\n            )\n        elif stabilization.get("supported") is False:\n            print("  [memory] host telemetry unavailable; isolation is advisory only")\n        if stabilization.get("supported") and not stabilization.get("stable"):\n            print("  [memory] WARNING: host memory did not stabilize before timeout")\n    return report\n'''
+          new_settle_runner = '''def _settle_memory(\n    paths: Sequence[Path],\n    *,\n    announce: bool = True,\n    target_available_mib: float | None = None,\n    enforce_recovery: bool = False,\n) -> dict[str, Any]:\n    report = settle_benchmark_memory(\n        paths,\n        target_available_mib=target_available_mib,\n    )\n    stabilization = report.get("stabilization")\n    recovery = report.get("recovery")\n    if announce and isinstance(stabilization, dict):\n        final = stabilization.get("final")\n        if isinstance(final, dict):\n            stable = "yes" if stabilization.get("stable") else "no"\n            suffix = ""\n            if isinstance(recovery, dict):\n                suffix = f" recovered={'yes' if recovery.get('recovered') else 'no'}"\n            print(\n                "  [memory] "\n                f"available={float(final['mem_available_mib']):.0f} MiB "\n                f"cached={float(final['cached_mib']):.0f} MiB "\n                f"stable={stable}{suffix}"\n            )\n        elif stabilization.get("supported") is False:\n            print("  [memory] host telemetry unavailable; isolation is advisory only")\n    if enforce_recovery and isinstance(recovery, dict) and recovery.get("supported"):\n        if not recovery.get("recovered"):\n            final = recovery.get("final")\n            available = (\n                float(final.get("mem_available_mib", 0.0))\n                if isinstance(final, dict)\n                else 0.0\n            )\n            threshold = float(recovery.get("threshold_available_mib", 0.0))\n            raise MemoryRecoveryError(\n                "host memory did not recover after llama-server shutdown: "\n                f"available={available:.0f} MiB, required>={threshold:.0f} MiB"\n            )\n    return report\n\n\ndef _recover_memory(\n    paths: Sequence[Path],\n    args: argparse.Namespace,\n    *,\n    announce: bool = False,\n) -> dict[str, Any]:\n    target = getattr(args, "memory_baseline_mib", None)\n    return _settle_memory(\n        paths,\n        announce=announce,\n        target_available_mib=target,\n        enforce_recovery=target is not None,\n    )\n'''
+          replace_once("tests/benchmark/run_realworld_suite_v2.py", old_settle_runner, new_settle_runner)
+
+          # Every post-server cleanup and clean restart is now a recovery gate.
+          text = Path("tests/benchmark/run_realworld_suite_v2.py").read_text(encoding="utf-8")
+          text = text.replace("_settle_memory(cleanup_paths, announce=False)", "_recover_memory(cleanup_paths, args, announce=False)")
+          text = text.replace("    _settle_memory(cleanup_paths)\n    print(f\"  [server] {config.name} · {config.runtime.signature()}\")", "    _recover_memory(cleanup_paths, args, announce=True)\n    print(f\"  [server] {config.name} · {config.runtime.signature()}\")")
+          Path("tests/benchmark/run_realworld_suite_v2.py").write_text(text, encoding="utf-8")
+
+          replace_once(
+              "tests/benchmark/run_realworld_suite_v2.py",
+              '''    if args.plan_only:\n        return 0\n\n    try:\n''',
+              '''    if args.plan_only:\n        return 0\n\n    cleanup_paths = _memory_cleanup_paths(documents)\n    baseline_report = _settle_memory(cleanup_paths, announce=True)\n    stabilization = baseline_report.get("stabilization")\n    baseline_final = stabilization.get("final") if isinstance(stabilization, dict) else None\n    args.memory_baseline_mib = (\n        float(baseline_final["mem_available_mib"])\n        if isinstance(baseline_final, dict)\n        else None\n    )\n    state["memory_session"] = {\n        "started_at": datetime.now().isoformat(timespec="seconds"),\n        "baseline_available_mib": args.memory_baseline_mib,\n        "memory_isolation": MEMORY_ISOLATION_VERSION,\n    }\n    _save_state(output_dir, state)\n    if args.memory_baseline_mib is not None:\n        print(f"  [memory] session baseline={args.memory_baseline_mib:.0f} MiB available")\n\n    try:\n''',
+          )
+          replace_once(
+              "tests/benchmark/run_realworld_suite_v2.py",
+              '''    except KeyboardInterrupt:\n        print("\\n[benchmark] Interrotto: checkpoint conservato")\n        _save_state(output_dir, state)\n        _write_results(output_dir, state)\n        return 130\n\n    print("\\n=== COMPLETATO ===")\n''',
+              '''    except MemoryRecoveryError as exc:\n        print(f"\\n[benchmark] STOP memoria: {exc}")\n        print("[benchmark] Checkpoint conservato; libera RAM o riavvia e usa --resume")\n        _save_state(output_dir, state)\n        _write_results(output_dir, state)\n        return 75\n    except KeyboardInterrupt:\n        print("\\n[benchmark] Interrotto: checkpoint conservato")\n        _save_state(output_dir, state)\n        _write_results(output_dir, state)\n        return 130\n\n    print("\\n=== COMPLETATO ===")\n''',
+          )
+
+          # ------------------------------------------------------------------
+          # 4. Tests: stock omission, parent-death ownership, recovery baseline.
+          # ------------------------------------------------------------------
+          replace_once(
+              "tests/test_core/test_llama_backend.py",
+              "from config.constants import AppConstants\n",
+              "",
+          )
+          replace_once(
+              "tests/test_core/test_llama_backend.py",
+              "from core.llama_backend import LlamaServerBackend, _production_runtime_args\n",
+              "from core.llama_backend import LlamaServerBackend, _production_runtime_args\nfrom core.owned_process import owned_process_argv\n",
+          )
+          start = Path("tests/test_core/test_llama_backend.py").read_text(encoding="utf-8")
+          old_test_start = start.index("def test_production_runtime_args_match_benchmark_selected_profile()")
+          replacement = '''def test_production_runtime_args_leave_llama_cpp_tuning_stock() -> None:\n    assert _production_runtime_args() == []\n\n\ndef test_linux_owned_process_uses_parent_death_exec_shim() -> None:\n    args = owned_process_argv(["/tmp/llama-server", "--version"], owner_pid=1234)\n    if __import__("os").name == "posix" and __import__("sys").platform.startswith("linux"):\n        assert args[-4:] == ["1234", "--", "/tmp/llama-server", "--version"]\n    else:\n        assert args == ["/tmp/llama-server", "--version"]\n'''
+          Path("tests/test_core/test_llama_backend.py").write_text(start[:old_test_start] + replacement, encoding="utf-8")
+
+          replace_once(
+              "tests/test_core/test_benchmark_pipeline_overrides.py",
+              "    # Benchmark and production now share the canonical selected context.\n    assert llama_backend.CONTEXT_SIZE == 16384\n",
+              "    # Production no longer forces a llama.cpp context size.\n    assert llama_backend.CONTEXT_SIZE is None\n",
+          )
+          replace_once(
+              "tests/test_core/test_benchmark_pipeline_overrides.py",
+              '''def test_realworld_benchmark_baseline_is_uncapped_and_16k_only() -> None:\n    baseline = canonical_policy.production_baseline("OCR", name="test")\n    assert canonical_policy.BENCHMARK_BASELINE_MAX_IMAGE_DIM == 8192\n    assert baseline.max_image_dim == 8192\n    assert baseline.runtime.context_size == 16384\n    # Canonical baseline reads the same production source of truth.\n    assert llama_backend.CONTEXT_SIZE == 16384\n    assert llama_ocr_api.MAX_IMAGE_DIM == 8192\n''',
+              '''def test_realworld_benchmark_baseline_uses_stock_llama_runtime() -> None:\n    baseline = canonical_policy.production_baseline("OCR", name="test")\n    assert canonical_policy.BENCHMARK_BASELINE_MAX_IMAGE_DIM == 8192\n    assert baseline.max_image_dim == 8192\n    assert baseline.runtime.cli_args() == []\n    assert baseline.runtime.context_size is None\n    assert llama_backend.CONTEXT_SIZE is None\n    assert llama_ocr_api.MAX_IMAGE_DIM == 8192\n''',
+          )
+
+          append_runtime_tests = '''\n\ndef test_stock_runtime_emits_no_tuning_flags() -> None:\n    runtime = ServerRuntimeConfig().resolved()\n    assert runtime.cli_args() == []\n    assert "stock" in runtime.signature()\n\n\ndef test_explicit_runtime_emits_only_requested_overrides() -> None:\n    runtime = ServerRuntimeConfig(context_size=8192, flash_attn="off", kv_offload=False).resolved()\n    assert runtime.cli_args() == ["-c", "8192", "-fa", "off", "-nkvo"]\n'''
+          with Path("tests/test_core/test_benchmark_runtime_backend.py").open("a", encoding="utf-8") as handle:
+              handle.write(append_runtime_tests)
+
+          replace_once(
+              "tests/test_core/test_benchmark_memory_guard.py",
+              '''    wait_for_memory_stable,\n''',
+              '''    wait_for_memory_recovery,\n    wait_for_memory_stable,\n''',
+          )
+          with Path("tests/test_core/test_benchmark_memory_guard.py").open("a", encoding="utf-8") as handle:
+              handle.write('''\n\ndef test_wait_for_memory_recovery_requires_baseline_and_stability() -> None:\n    readings = iter((\n        _snapshot(3000.0, monotonic_s=0.0),\n        _snapshot(4500.0, monotonic_s=0.1),\n        _snapshot(4700.0, monotonic_s=0.2),\n        _snapshot(4710.0, monotonic_s=0.3),\n        _snapshot(4705.0, monotonic_s=0.4),\n    ))\n    report = wait_for_memory_recovery(\n        5000.0,\n        timeout_s=2.0,\n        interval_s=0.0,\n        recovery_tolerance_mib=320.0,\n        snapshot_reader=lambda: next(readings),\n        sleep=lambda _seconds: None,\n    )\n    assert report.recovered is True\n    assert report.stable is True\n    assert report.threshold_available_mib == 4680.0\n    assert report.final is not None\n    assert report.final.mem_available_mib == 4705.0\n''')
+
+          replace_once(
+              "tests/test_core/test_benchmark_resource_limits.py",
+              "    assert MEMORY_ISOLATION_VERSION == 2\n",
+              "    assert MEMORY_ISOLATION_VERSION == 3\n",
+          )
+
+          # Docs reflect protocol semantics; old schema-6 measurements stay historical.
+          doc = Path("tests/benchmark/REALWORLD.md")
+          text = doc.read_text(encoding="utf-8")
+          text = text.replace(
+              "fresh app-owned `llama-server` for every tested profile;",
+              "fresh app-owned `llama-server` for every tested profile, launched with Linux parent-death ownership so a killed benchmark cannot orphan it;",
+          )
+          text = text.replace(
+              "targeted `POSIX_FADV_DONTNEED` for benchmark GGUF/input files plus bounded host-memory stabilization before and after every profile; no global `drop_caches` and no root requirement;",
+              "targeted `POSIX_FADV_DONTNEED`, Python/C heap trimming and bounded recovery toward the invocation's clean `MemAvailable` baseline before and after every profile; no global `drop_caches` and no root requirement;",
+          )
+          text = text.replace(
+              "Memory-isolation protocol v2 adds a hard safety floor of **256 MiB MemAvailable**.",
+              "Memory-isolation protocol v3 adds an earlier hard safety floor of **1024 MiB MemAvailable**.",
+          )
+          text = text.replace(
+              "Resume is resource-aware: terminal failures are stored under `terminal_config_failures`. Existing schema-6 checkpoints created before protocol v2 are migrated lazily; an already failed observation whose recorded `MemAvailable` fell at or below the safety floor is promoted to a terminal resource limit and is not executed again. Successful historical observations are never retroactively invalidated.",
+              "Resume is resource-aware: terminal failures are stored under `terminal_config_failures`. Protocol v3 also refuses to continue after a profile if host RAM does not recover close to the invocation baseline within a bounded timeout; the checkpoint is preserved for a clean resume. Because the benchmark baseline now means actual stock llama.cpp runtime (no tuning flags), checkpoint schema 7 intentionally rejects older schema-6 runs instead of mixing incompatible baselines.",
+          )
+          text = text.replace(
+              "The benchmark runtime remains SYCL-only, full GPU-layer offload and `--parallel 1`, matching the application's architectural constraints.",
+              "The benchmark runtime remains SYCL-only, full GPU-layer offload and `--parallel 1`, matching the application's architectural constraints. All tunable runtime flags are omitted in the baseline so the installed llama.cpp build uses its own stock defaults; Stage A then adds one explicit override at a time.",
+          )
+          text = text.replace(
+              "Memory isolation is part of the canonical protocol and uses checkpoint schema **6**. Protocol v2 keeps schema 6 so existing v1 checkpoints remain resumable: the safety guard changes only handling of unsafe failures, while previously successful measurements keep their original data. Older schema-5 checkpoints are still rejected.",
+              "Memory isolation is part of the canonical protocol and uses checkpoint schema **7**. Schema 7 marks the stock-runtime baseline and recovery-to-baseline semantics; older checkpoints remain valid historical results but must not be resumed under the new protocol.",
+          )
+          doc.write_text(text, encoding="utf-8")
+
+          # Ensure no stale production tuning constants remain referenced.
+          stale = ("LLAMA_CONTEXT_SIZE", "LLAMA_BATCH_SIZE", "LLAMA_UBATCH_SIZE", "LLAMA_THREADS", "LLAMA_THREADS_BATCH", "LLAMA_FLASH_ATTN", "LLAMA_CACHE_TYPE_K", "LLAMA_CACHE_TYPE_V", "LLAMA_SPEC_TYPE", "LLAMA_KV_OFFLOAD", "LLAMA_OP_OFFLOAD")
+          for path in (Path("config/constants.py"), Path("core/llama_backend.py")):
+              source = path.read_text(encoding="utf-8")
+              leftovers = [name for name in stale if name in source]
+              if leftovers:
+                  raise SystemExit(f"{path}: stale tuned defaults remain: {leftovers}")
+          PY
+
+          python -m compileall -q main.py config core ui tests
+          bash -n install.sh
+          bash -n PKGBUILD
+          python -m pytest -q
+          git diff --check
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config core tests
+          git commit -m "Restore stock llama runtime and enforce memory recovery"
+          git push origin HEAD:stock-runtime-memory-recovery

@@ -17,7 +17,11 @@ class _Diagnostics:
     def to_dict(self) -> dict[str, object]:
         return {
             "process_exited": self.process_exited,
-            "returncode": -9 if self.process_exited else None,
+            "returncode": (
+                (-9 if self.suspected_oom else 1)
+                if self.process_exited
+                else None
+            ),
             "suspected_oom": self.suspected_oom,
             "log_tail": "out of memory" if self.suspected_oom else "",
         }
@@ -54,7 +58,7 @@ def _observation(*, error: str | None) -> Observation:
 
 def test_dead_server_is_restarted_before_document_retry(monkeypatch) -> None:
     first_backend = _Backend(
-        _Diagnostics(process_exited=True, suspected_oom=True)
+        _Diagnostics(process_exited=True, suspected_oom=False)
     )
     second_backend = _Backend(
         _Diagnostics(process_exited=False, suspected_oom=False)

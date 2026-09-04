@@ -81,8 +81,8 @@ Canonical settings:
 - discard one best and one worst value independently for every metric;
 - average the middle 3;
 - rotate FACILE/MEDIO/DIFFICILE order between runs;
-- fresh app-owned `llama-server` for every tested profile;
-- targeted `POSIX_FADV_DONTNEED` for benchmark GGUF/input files plus bounded host-memory stabilization before and after every profile; no global `drop_caches` and no root requirement;
+- fresh app-owned `llama-server` for every tested profile, launched with Linux parent-death ownership so a killed benchmark cannot orphan it;
+- targeted `POSIX_FADV_DONTNEED`, Python/C heap trimming and bounded recovery toward the invocation's clean `MemAvailable` baseline before and after every profile; no global `drop_caches` and no root requirement;
 - non-corpus warm-up after every server start;
 - `cache_prompt=false` on benchmark requests;
 - any configuration reporting non-zero `cache_n` is excluded from speed decisions;
@@ -144,17 +144,17 @@ Current canonical candidates include:
 - KV offload on/off;
 - operation offload on/off.
 
-The benchmark runtime remains SYCL-only, full GPU-layer offload and `--parallel 1`, matching the application's architectural constraints.
+The benchmark runtime remains SYCL-only, full GPU-layer offload and `--parallel 1`, matching the application's architectural constraints. All tunable runtime flags are omitted in the baseline so the installed llama.cpp build uses its own stock defaults; Stage A then adds one explicit override at a time.
 
 Variables intentionally not treated as OCR inference tuning include process priority/CPU affinity, multi-user parallelism, model load mode/mmap and partial `-ngl`: they either measure host scheduling/startup, a different concurrency workload, or violate the strict full-offload target.
 
 Memory telemetry is sampled throughout every OCR request. Each observation records minimum host `MemAvailable`, minimum free RAM, peak cache, peak swap use, peak `llama-server` RSS and peak benchmark-harness RSS. This system-level signal is especially important on integrated GPUs, where GPU allocations compete with the host for the same physical RAM.
 
-Memory-isolation protocol v2 adds a hard safety floor of **256 MiB MemAvailable**. If the sampler crosses that floor, it terminates only the benchmark-owned `llama-server`; it never kills unrelated applications. The observation is classified `resource_limit_confirmed`, the whole configuration becomes terminal for that stage, memory is stabilized, and the beam search moves to the next candidate instead of repeating a configuration that is already outside the machine's usable resource envelope.
+Memory-isolation protocol v3 adds an earlier hard safety floor of **2048 MiB MemAvailable**. If the sampler crosses that floor, it terminates only the benchmark-owned `llama-server`; it never kills unrelated applications. The observation is classified `resource_limit_confirmed`, the whole configuration becomes terminal for that stage, memory is stabilized, and the beam search moves to the next candidate instead of repeating a configuration that is already outside the machine's usable resource envelope.
 
 If `llama-server` terminates for a non-memory reason, the retry is never sent to the dead port. The runner captures exit/log diagnostics, shuts down the owned process group, performs targeted cache eviction and memory stabilization, starts the exact same runtime profile again, performs the non-corpus warm-up and retries the document. Explicit OOM diagnostics are classified as resource limits; ordinary server crashes keep the existing single clean-restart recovery path.
 
-Resume is resource-aware: terminal failures are stored under `terminal_config_failures`. Existing schema-6 checkpoints created before protocol v2 are migrated lazily; an already failed observation whose recorded `MemAvailable` fell at or below the safety floor is promoted to a terminal resource limit and is not executed again. Successful historical observations are never retroactively invalidated.
+Resume is resource-aware: terminal failures are stored under `terminal_config_failures`. Protocol v3 also refuses to continue after a profile if host RAM does not recover close to the invocation baseline within a bounded timeout; the checkpoint is preserved for a clean resume. Because the benchmark baseline now means actual stock llama.cpp runtime (no tuning flags), checkpoint schema 7 intentionally rejects older schema-6 runs instead of mixing incompatible baselines.
 
 ## Quality gates
 
@@ -224,7 +224,7 @@ The benchmark checkpoints after every document. Resume with:
   --resume benchmark-results/realworld-v2-YYYYMMDD-HHMMSS
 ```
 
-All four input hashes are checked before continuing. Memory isolation is part of the canonical protocol and uses checkpoint schema **6**. Protocol v2 keeps schema 6 so existing v1 checkpoints remain resumable: the safety guard changes only handling of unsafe failures, while previously successful measurements keep their original data. Older schema-5 checkpoints are still rejected.
+All four input hashes are checked before continuing. Memory isolation is part of the canonical protocol and uses checkpoint schema **7**. Schema 7 marks the stock-runtime baseline and recovery-to-baseline semantics; older checkpoints remain valid historical results but must not be resumed under the new protocol.
 
 The run can also be deliberately split:
 

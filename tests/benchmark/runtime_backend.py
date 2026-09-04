@@ -2,7 +2,8 @@
 
 This module reuses the production SYCL runtime/model discovery and owned-process
 lifecycle while allowing the canonical hardware benchmark to vary inference
-flags around the production profile defined in ``config.constants``.
+flags around a stock llama.cpp baseline. A ``None`` runtime field means the
+corresponding CLI flag is omitted and llama.cpp keeps its native default.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from config.constants import AppConstants, AppMeta
+from config.constants import AppMeta
 from core.event_bus import EventBus
 from core.exceptions import ModelLoadError
 from core.llama_backend import (
@@ -24,12 +25,13 @@ from core.llama_backend import (
 )
 from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS, find_llama_server, venv_lib_env
 from core.llama_models import GGUF_CACHE_DIR, GGUF_MODEL_FILES
+from core.owned_process import spawn_owned_process
 from tests.benchmark.memory_guard import process_rss_mib
 
 CACHE_TYPES = ("f16", "bf16", "q8_0", "q5_0", "q4_0")
 FLASH_ATTN_VALUES = ("auto", "on", "off")
 SPEC_TYPES = ("none", "draft-mtp")
-BENCHMARK_BASELINE_CONTEXT_SIZE = AppConstants.LLAMA_CONTEXT_SIZE
+BENCHMARK_BASELINE_CONTEXT_SIZE: None = None
 _OOM_MARKERS = (
     "out of memory",
     "cannot allocate memory",
@@ -46,82 +48,114 @@ _OOM_MARKERS = (
 
 @dataclass(frozen=True)
 class ServerRuntimeConfig:
-    context_size: int = 4096
-    batch_size: int = 1024
-    ubatch_size: int = 512
-    threads: int = 0
-    threads_batch: int = 0
-    flash_attn: str = "auto"
-    cache_type_k: str = "f16"
-    cache_type_v: str = "f16"
-    spec_type: str = "none"
-    kv_offload: bool = True
-    op_offload: bool = True
+    """Explicit llama-server overrides; ``None`` preserves the stock value."""
+
+    context_size: int | None = None
+    batch_size: int | None = None
+    ubatch_size: int | None = None
+    threads: int | None = None
+    threads_batch: int | None = None
+    flash_attn: str | None = None
+    cache_type_k: str | None = None
+    cache_type_v: str | None = None
+    spec_type: str | None = None
+    kv_offload: bool | None = None
+    op_offload: bool | None = None
 
     def resolved(self) -> "ServerRuntimeConfig":
-        optimal = LlamaServerBackend._optimal_thread_count()
-        threads = int(self.threads) if int(self.threads) > 0 else optimal
-        threads_batch = int(self.threads_batch) if int(self.threads_batch) > 0 else threads
         result = ServerRuntimeConfig(
-            context_size=int(self.context_size),
-            batch_size=int(self.batch_size),
-            ubatch_size=int(self.ubatch_size),
-            threads=threads,
-            threads_batch=threads_batch,
-            flash_attn=str(self.flash_attn).lower(),
-            cache_type_k=str(self.cache_type_k).lower(),
-            cache_type_v=str(self.cache_type_v).lower(),
-            spec_type=str(self.spec_type).lower(),
-            kv_offload=bool(self.kv_offload),
-            op_offload=bool(self.op_offload),
+            context_size=None if self.context_size is None else int(self.context_size),
+            batch_size=None if self.batch_size is None else int(self.batch_size),
+            ubatch_size=None if self.ubatch_size is None else int(self.ubatch_size),
+            threads=None if self.threads is None else int(self.threads),
+            threads_batch=None if self.threads_batch is None else int(self.threads_batch),
+            flash_attn=None if self.flash_attn is None else str(self.flash_attn).lower(),
+            cache_type_k=None if self.cache_type_k is None else str(self.cache_type_k).lower(),
+            cache_type_v=None if self.cache_type_v is None else str(self.cache_type_v).lower(),
+            spec_type=None if self.spec_type is None else str(self.spec_type).lower(),
+            kv_offload=None if self.kv_offload is None else bool(self.kv_offload),
+            op_offload=None if self.op_offload is None else bool(self.op_offload),
         )
         result.validate()
         return result
 
     def validate(self) -> None:
-        if not 1024 <= int(self.context_size) <= 32768:
+        if self.context_size is not None and not 1024 <= self.context_size <= 32768:
             raise ValueError("context_size fuori range 1024..32768")
-        if not 32 <= int(self.batch_size) <= 8192:
+        if self.batch_size is not None and not 32 <= self.batch_size <= 8192:
             raise ValueError("batch_size fuori range 32..8192")
-        if not 32 <= int(self.ubatch_size) <= int(self.batch_size):
-            raise ValueError("ubatch_size deve essere 32..batch_size")
-        if int(self.threads) < 1 or int(self.threads_batch) < 1:
-            raise ValueError("threads/threads_batch devono essere >= 1")
-        if self.flash_attn not in FLASH_ATTN_VALUES:
+        if self.ubatch_size is not None and self.ubatch_size < 32:
+            raise ValueError("ubatch_size deve essere >= 32")
+        if (
+            self.ubatch_size is not None
+            and self.batch_size is not None
+            and self.ubatch_size > self.batch_size
+        ):
+            raise ValueError("ubatch_size deve essere <= batch_size quando entrambi sono espliciti")
+        if self.threads is not None and self.threads < 1:
+            raise ValueError("threads deve essere >= 1")
+        if self.threads_batch is not None and self.threads_batch < 1:
+            raise ValueError("threads_batch deve essere >= 1")
+        if self.flash_attn is not None and self.flash_attn not in FLASH_ATTN_VALUES:
             raise ValueError(f"flash_attn non valido: {self.flash_attn}")
-        if self.cache_type_k not in CACHE_TYPES or self.cache_type_v not in CACHE_TYPES:
-            raise ValueError("tipo KV cache non supportato dalla suite")
-        if self.spec_type not in SPEC_TYPES:
+        if self.cache_type_k is not None and self.cache_type_k not in CACHE_TYPES:
+            raise ValueError("tipo KV cache K non supportato dalla suite")
+        if self.cache_type_v is not None and self.cache_type_v not in CACHE_TYPES:
+            raise ValueError("tipo KV cache V non supportato dalla suite")
+        if self.spec_type is not None and self.spec_type not in SPEC_TYPES:
             raise ValueError(f"spec_type non valido: {self.spec_type}")
 
     def signature(self) -> str:
         r = self.resolved()
+
+        def value(item: object) -> str:
+            if item is None:
+                return "stock"
+            if isinstance(item, bool):
+                return str(int(item))
+            return str(item)
         return (
-            f"ctx{r.context_size}-b{r.batch_size}-ub{r.ubatch_size}-"
-            f"t{r.threads}-tb{r.threads_batch}-fa{r.flash_attn}-"
-            f"k{r.cache_type_k}-v{r.cache_type_v}-spec{r.spec_type}-"
-            f"kvo{int(r.kv_offload)}-opo{int(r.op_offload)}"
+            f"ctx{value(r.context_size)}-b{value(r.batch_size)}-ub{value(r.ubatch_size)}-"
+            f"t{value(r.threads)}-tb{value(r.threads_batch)}-fa{value(r.flash_attn)}-"
+            f"k{value(r.cache_type_k)}-v{value(r.cache_type_v)}-spec{value(r.spec_type)}-"
+            f"kvo{value(r.kv_offload)}-opo{value(r.op_offload)}"
         )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self.resolved())
 
+    def cli_args(self) -> list[str]:
+        r = self.resolved()
+        args: list[str] = []
+        scalar = (
+            ("-c", r.context_size),
+            ("-b", r.batch_size),
+            ("-ub", r.ubatch_size),
+            ("-t", r.threads),
+            ("-tb", r.threads_batch),
+            ("-fa", r.flash_attn),
+            ("-ctk", r.cache_type_k),
+            ("-ctv", r.cache_type_v),
+            ("--spec-type", r.spec_type),
+        )
+        for flag, item in scalar:
+            if item is not None:
+                args.extend((flag, str(item)))
+        if r.kv_offload is not None:
+            args.append("-kvo" if r.kv_offload else "-nkvo")
+        if r.op_offload is not None:
+            args.append("--op-offload" if r.op_offload else "--no-op-offload")
+        return args
+
+
+def stock_runtime_config() -> ServerRuntimeConfig:
+    """Return a baseline with no tunable llama.cpp CLI overrides."""
+    return ServerRuntimeConfig().resolved()
+
 
 def production_runtime_config() -> ServerRuntimeConfig:
-    """Return the canonical production runtime used as benchmark baseline."""
-    return ServerRuntimeConfig(
-        context_size=AppConstants.LLAMA_CONTEXT_SIZE,
-        batch_size=AppConstants.LLAMA_BATCH_SIZE,
-        ubatch_size=AppConstants.LLAMA_UBATCH_SIZE,
-        threads=AppConstants.LLAMA_THREADS,
-        threads_batch=AppConstants.LLAMA_THREADS_BATCH,
-        flash_attn=AppConstants.LLAMA_FLASH_ATTN,
-        cache_type_k=AppConstants.LLAMA_CACHE_TYPE_K,
-        cache_type_v=AppConstants.LLAMA_CACHE_TYPE_V,
-        spec_type=AppConstants.LLAMA_SPEC_TYPE,
-        kv_offload=AppConstants.LLAMA_KV_OFFLOAD,
-        op_offload=AppConstants.LLAMA_OP_OFFLOAD,
-    ).resolved()
+    """Compatibility alias: production now intentionally uses stock runtime values."""
+    return stock_runtime_config()
 
 
 @dataclass(frozen=True)
@@ -308,31 +342,10 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
             LLAMA_SERVER_HOST,
             "-ngl",
             str(GPU_OFFLOAD_ALL_LAYERS),
-            "-c",
-            str(runtime.context_size),
-            "-b",
-            str(runtime.batch_size),
-            "-ub",
-            str(runtime.ubatch_size),
-            "-t",
-            str(runtime.threads),
-            "-tb",
-            str(runtime.threads_batch),
+            *runtime.cli_args(),
             "--parallel",
             str(N_PARALLEL),
-            "--cache-ram",
-            "0",
             "--metrics",
-            "-fa",
-            runtime.flash_attn,
-            "-ctk",
-            runtime.cache_type_k,
-            "-ctv",
-            runtime.cache_type_v,
-            "--spec-type",
-            runtime.spec_type,
-            "-kvo" if runtime.kv_offload else "-nkvo",
-            "--op-offload" if runtime.op_offload else "--no-op-offload",
         ]
 
         env = venv_lib_env()
@@ -358,13 +371,8 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
         log_file: Any = None
         try:
             log_file = open(log_path, "a", encoding="utf-8")
-            process = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=(os.name == "posix"),
-            )
+            handle = spawn_owned_process(cmd, stdout=log_file, env=env)
+            process = handle.process
         except Exception as exc:
             if log_file is not None:
                 try:
@@ -376,6 +384,7 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
         with self._process_lock:
             self._log_file = log_file
             self._process = process
+            self._process_group_id = handle.process_group_id
             self._server_port = port
             self._server_url = url
             self._benchmark_log_path = log_path

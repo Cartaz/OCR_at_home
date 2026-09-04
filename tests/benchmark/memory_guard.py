@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import gc
 import os
 import threading
@@ -10,8 +11,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-MEMORY_ISOLATION_VERSION = 2
-MEMORY_PRESSURE_FLOOR_MIB = 256.0
+MEMORY_ISOLATION_VERSION = 3
+MEMORY_PRESSURE_FLOOR_MIB = 2048.0
+MEMORY_RECOVERY_MIN_TOLERANCE_MIB = 512.0
+MEMORY_RECOVERY_FRACTION = 0.05
+_DEFAULT_RECOVERY_TIMEOUT_S = 30.0
 _DEFAULT_SAMPLE_INTERVAL_S = 0.10
 _DEFAULT_SETTLE_TIMEOUT_S = 6.0
 _DEFAULT_SETTLE_INTERVAL_S = 0.20
@@ -280,6 +284,28 @@ class MemorySampler:
         }
 
 
+def trim_process_heap() -> bool:
+    """Ask glibc to return free allocator arenas after Python/C-extension cleanup."""
+    gc.collect()
+    if os.name != "posix":
+        return False
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = getattr(libc, "malloc_trim")
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        return bool(malloc_trim(0))
+    except (AttributeError, OSError):
+        return False
+
+
+def memory_recovery_tolerance_mib(mem_total_mib: float) -> float:
+    return max(
+        MEMORY_RECOVERY_MIN_TOLERANCE_MIB,
+        max(0.0, float(mem_total_mib)) * MEMORY_RECOVERY_FRACTION,
+    )
+
+
 @dataclass(frozen=True)
 class CacheEvictionReport:
     supported: bool
@@ -357,6 +383,97 @@ class MemoryStabilizationReport:
         }
 
 
+@dataclass(frozen=True)
+class MemoryRecoveryReport:
+    supported: bool
+    recovered: bool
+    stable: bool
+    elapsed_s: float
+    sample_count: int
+    target_available_mib: float
+    tolerance_mib: float
+    threshold_available_mib: float
+    available_spread_mib: float | None
+    final: SystemMemorySnapshot | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "supported": self.supported,
+            "recovered": self.recovered,
+            "stable": self.stable,
+            "elapsed_s": self.elapsed_s,
+            "sample_count": self.sample_count,
+            "target_available_mib": self.target_available_mib,
+            "tolerance_mib": self.tolerance_mib,
+            "threshold_available_mib": self.threshold_available_mib,
+            "available_spread_mib": self.available_spread_mib,
+            "final": self.final.to_dict() if self.final is not None else None,
+        }
+
+
+def wait_for_memory_recovery(
+    target_available_mib: float,
+    *,
+    timeout_s: float = _DEFAULT_RECOVERY_TIMEOUT_S,
+    interval_s: float = _DEFAULT_SETTLE_INTERVAL_S,
+    stable_samples: int = _DEFAULT_STABLE_SAMPLES,
+    stable_tolerance_mib: float = _DEFAULT_STABLE_TOLERANCE_MIB,
+    recovery_tolerance_mib: float | None = None,
+    snapshot_reader: Callable[[], SystemMemorySnapshot | None] = read_system_memory,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> MemoryRecoveryReport:
+    target = max(0.0, float(target_available_mib))
+    timeout_s = max(0.0, float(timeout_s))
+    interval_s = max(0.0, float(interval_s))
+    stable_samples = max(2, int(stable_samples))
+    stable_tolerance_mib = max(0.0, float(stable_tolerance_mib))
+    started = clock()
+    recent: list[SystemMemorySnapshot] = []
+    total_samples = 0
+    tolerance: float | None = None
+
+    while True:
+        snapshot = snapshot_reader()
+        if snapshot is None:
+            return MemoryRecoveryReport(
+                False, True, True, max(0.0, clock() - started), total_samples,
+                target, 0.0, target, None, None,
+            )
+        total_samples += 1
+        if tolerance is None:
+            tolerance = (
+                memory_recovery_tolerance_mib(snapshot.mem_total_mib)
+                if recovery_tolerance_mib is None
+                else max(0.0, float(recovery_tolerance_mib))
+            )
+        threshold = max(0.0, target - tolerance)
+        recent.append(snapshot)
+        if len(recent) > stable_samples:
+            recent.pop(0)
+
+        spread: float | None = None
+        stable = False
+        recovered = False
+        if len(recent) == stable_samples:
+            values = [item.mem_available_mib for item in recent]
+            spread = max(values) - min(values)
+            stable = spread <= stable_tolerance_mib
+            recovered = stable and min(values) >= threshold
+            if recovered:
+                return MemoryRecoveryReport(
+                    True, True, True, max(0.0, clock() - started), total_samples,
+                    target, tolerance, threshold, spread, snapshot,
+                )
+
+        if clock() - started >= timeout_s:
+            return MemoryRecoveryReport(
+                True, False, stable, max(0.0, clock() - started), total_samples,
+                target, tolerance, threshold, spread, snapshot,
+            )
+        sleep(interval_s)
+
+
 def wait_for_memory_stable(
     *,
     timeout_s: float = _DEFAULT_SETTLE_TIMEOUT_S,
@@ -425,14 +542,33 @@ def settle_benchmark_memory(
     paths: Sequence[Path],
     *,
     timeout_s: float = _DEFAULT_SETTLE_TIMEOUT_S,
+    target_available_mib: float | None = None,
+    recovery_timeout_s: float = _DEFAULT_RECOVERY_TIMEOUT_S,
 ) -> dict[str, object]:
-    """Release benchmark-owned cache pressure and wait for host RAM to settle."""
+    """Release owned pressure and either stabilize or recover to session baseline."""
 
-    gc.collect()
+    heap_trimmed = trim_process_heap()
     eviction = evict_file_cache(paths)
-    stabilization = wait_for_memory_stable(timeout_s=timeout_s)
+    recovery: MemoryRecoveryReport | None = None
+    if target_available_mib is None:
+        stabilization = wait_for_memory_stable(timeout_s=timeout_s)
+    else:
+        recovery = wait_for_memory_recovery(
+            target_available_mib,
+            timeout_s=recovery_timeout_s,
+        )
+        stabilization = MemoryStabilizationReport(
+            supported=recovery.supported,
+            stable=recovery.stable,
+            elapsed_s=recovery.elapsed_s,
+            sample_count=recovery.sample_count,
+            available_spread_mib=recovery.available_spread_mib,
+            final=recovery.final,
+        )
     return {
         "memory_isolation_version": MEMORY_ISOLATION_VERSION,
+        "heap_trimmed": heap_trimmed,
         "cache_eviction": eviction.to_dict(),
         "stabilization": stabilization.to_dict(),
+        "recovery": recovery.to_dict() if recovery is not None else None,
     }

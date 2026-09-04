@@ -77,17 +77,17 @@ def test_pipeline_benchmark_defaults_are_uncapped_and_16k_only() -> None:
     assert BENCHMARK_MAX_IMAGE_DIM == 8192
     assert baseline.name == "baseline"
     assert baseline.max_image_dim == 8192
-    # Benchmark and production now share the canonical selected context.
-    assert llama_backend.CONTEXT_SIZE == 16384
+    # Production no longer forces a llama.cpp context size.
+    assert llama_backend.CONTEXT_SIZE is None
 
 
-def test_realworld_benchmark_baseline_is_uncapped_and_16k_only() -> None:
+def test_realworld_benchmark_baseline_uses_stock_llama_runtime() -> None:
     baseline = canonical_policy.production_baseline("OCR", name="test")
     assert canonical_policy.BENCHMARK_BASELINE_MAX_IMAGE_DIM == 8192
     assert baseline.max_image_dim == 8192
-    assert baseline.runtime.context_size == 16384
-    # Canonical baseline reads the same production source of truth.
-    assert llama_backend.CONTEXT_SIZE == 16384
+    assert baseline.runtime.cli_args() == []
+    assert baseline.runtime.context_size is None
+    assert llama_backend.CONTEXT_SIZE is None
     assert llama_ocr_api.MAX_IMAGE_DIM == 8192
 
 

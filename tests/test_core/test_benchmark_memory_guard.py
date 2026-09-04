@@ -10,6 +10,7 @@ from tests.benchmark.memory_guard import (
     SystemMemorySnapshot,
     evict_file_cache,
     parse_meminfo,
+    wait_for_memory_recovery,
     wait_for_memory_stable,
 )
 
@@ -126,3 +127,26 @@ def test_cache_eviction_is_targeted_and_deduplicated(
     assert report.advised_files == 1
     assert len(calls) == 1
     assert calls[0][1:] == (0, 0, 4)
+
+
+def test_wait_for_memory_recovery_requires_baseline_and_stability() -> None:
+    readings = iter((
+        _snapshot(3000.0, monotonic_s=0.0),
+        _snapshot(4500.0, monotonic_s=0.1),
+        _snapshot(4700.0, monotonic_s=0.2),
+        _snapshot(4710.0, monotonic_s=0.3),
+        _snapshot(4705.0, monotonic_s=0.4),
+    ))
+    report = wait_for_memory_recovery(
+        5000.0,
+        timeout_s=2.0,
+        interval_s=0.0,
+        recovery_tolerance_mib=320.0,
+        snapshot_reader=lambda: next(readings),
+        sleep=lambda _seconds: None,
+    )
+    assert report.recovered is True
+    assert report.stable is True
+    assert report.threshold_available_mib == 4680.0
+    assert report.final is not None
+    assert report.final.mem_available_mib == 4705.0

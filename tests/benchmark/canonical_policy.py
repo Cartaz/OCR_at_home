@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Sequence
 
-from config.constants import AppConstants
 from core.llama_ocr_api import PROMPT_LEGACY_OCR, PROMPT_TEXT_RECOGNITION
 from tests.benchmark.coherent_quality_reference import quality_reference
 from tests.benchmark.ground_truth_parser import load_ground_truth
@@ -28,12 +27,12 @@ from tests.benchmark.realworld_suite_v2 import (
 )
 from tests.benchmark.runtime_backend import (
     RuntimeCapabilities,
-    production_runtime_config,
+    stock_runtime_config,
     runtime_stage_a_values,
 )
 
-CHECKPOINT_SCHEMA = 6
-BENCHMARK_BASELINE_MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM
+CHECKPOINT_SCHEMA = 7
+BENCHMARK_BASELINE_MAX_IMAGE_DIM = 8192
 
 
 def production_baseline(
@@ -41,12 +40,12 @@ def production_baseline(
     *,
     name: str = "baseline",
 ) -> PipelineConfig:
-    """Return the canonical production baseline used by the hardware suite."""
+    """Return the stock llama.cpp runtime baseline used by the hardware suite."""
     return PipelineConfig(
         name=name,
         prompt=prompt,
         max_image_dim=BENCHMARK_BASELINE_MAX_IMAGE_DIM,
-        runtime=production_runtime_config(),
+        runtime=stock_runtime_config(),
     )
 
 

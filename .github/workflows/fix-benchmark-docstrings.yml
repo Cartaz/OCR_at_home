@@ -1,0 +1,55 @@
+name: fix benchmark docstrings
+
+on:
+  push:
+    branches: [benchmark-production-profile-resource-guard]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: benchmark-production-profile-resource-guard
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fix stale benchmark documentation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = Path('tests/benchmark/runtime_backend.py')
+          text = runtime.read_text(encoding='utf-8')
+          old = '''Benchmark-only llama-server runtime tuning.\n\nProduction ``LlamaServerBackend`` is intentionally untouched.  This module uses\nexactly the same SYCL runtime/model discovery and owned-process lifecycle, but\nlets the canonical hardware benchmark vary inference/runtime flags.'''
+          new = '''Benchmark-only llama-server runtime tuning.\n\nThis module reuses the production SYCL runtime/model discovery and owned-process\nlifecycle while allowing the canonical hardware benchmark to vary inference\nflags around the production profile defined in ``config.constants``.'''
+          if old not in text:
+              raise SystemExit('runtime_backend docstring marker not found')
+          runtime.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          policy = Path('tests/benchmark/canonical_policy.py')
+          text = policy.read_text(encoding='utf-8')
+          old = 'Return the canonical production-like baseline used by the hardware suite.'
+          new = 'Return the canonical production baseline used by the hardware suite.'
+          if old not in text:
+              raise SystemExit('canonical_policy docstring marker not found')
+          policy.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python -m compileall -q tests/benchmark
+          git diff --check
+
+      - name: Commit docstring fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/benchmark/runtime_backend.py tests/benchmark/canonical_policy.py
+          git commit -m "Align benchmark docs with production profile ownership"
+          git push origin HEAD:benchmark-production-profile-resource-guard

@@ -41,7 +41,7 @@ def production_baseline(
     *,
     name: str = "baseline",
 ) -> PipelineConfig:
-    """Return the canonical production-like baseline used by the hardware suite."""
+    """Return the canonical production baseline used by the hardware suite."""
     return PipelineConfig(
         name=name,
         prompt=prompt,

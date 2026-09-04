@@ -1,8 +1,8 @@
 """Benchmark-only llama-server runtime tuning.
 
-Production ``LlamaServerBackend`` is intentionally untouched.  This module uses
-exactly the same SYCL runtime/model discovery and owned-process lifecycle, but
-lets the canonical hardware benchmark vary inference/runtime flags.
+This module reuses the production SYCL runtime/model discovery and owned-process
+lifecycle while allowing the canonical hardware benchmark to vary inference
+flags around the production profile defined in ``config.constants``.
 """
 
 from __future__ import annotations

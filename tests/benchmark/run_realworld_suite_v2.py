@@ -82,6 +82,10 @@ RESOURCE_LIMIT_FAILURE_CLASSES = frozenset(
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".gif"}
 
 
+class MemoryRecoveryError(RuntimeError):
+    """The host did not return close enough to the invocation memory baseline."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--easy", type=Path)
@@ -428,24 +432,63 @@ def _memory_cleanup_paths(documents: Sequence[BenchmarkDocument]) -> tuple[Path,
     return tuple(benchmark_cache_paths()) + tuple(doc.path for doc in documents)
 
 
-def _settle_memory(paths: Sequence[Path], *, announce: bool = True) -> dict[str, Any]:
-    report = settle_benchmark_memory(paths)
+def _settle_memory(
+    paths: Sequence[Path],
+    *,
+    announce: bool = True,
+    target_available_mib: float | None = None,
+    enforce_recovery: bool = False,
+) -> dict[str, Any]:
+    report = settle_benchmark_memory(
+        paths,
+        target_available_mib=target_available_mib,
+    )
     stabilization = report.get("stabilization")
+    recovery = report.get("recovery")
     if announce and isinstance(stabilization, dict):
         final = stabilization.get("final")
         if isinstance(final, dict):
             stable = "yes" if stabilization.get("stable") else "no"
+            suffix = ""
+            if isinstance(recovery, dict):
+                suffix = f" recovered={'yes' if recovery.get('recovered') else 'no'}"
             print(
                 "  [memory] "
                 f"available={float(final['mem_available_mib']):.0f} MiB "
                 f"cached={float(final['cached_mib']):.0f} MiB "
-                f"stable={stable}"
+                f"stable={stable}{suffix}"
             )
         elif stabilization.get("supported") is False:
             print("  [memory] host telemetry unavailable; isolation is advisory only")
-        if stabilization.get("supported") and not stabilization.get("stable"):
-            print("  [memory] WARNING: host memory did not stabilize before timeout")
+    if enforce_recovery and isinstance(recovery, dict) and recovery.get("supported"):
+        if not recovery.get("recovered"):
+            final = recovery.get("final")
+            available = (
+                float(final.get("mem_available_mib", 0.0))
+                if isinstance(final, dict)
+                else 0.0
+            )
+            threshold = float(recovery.get("threshold_available_mib", 0.0))
+            raise MemoryRecoveryError(
+                "host memory did not recover after llama-server shutdown: "
+                f"available={available:.0f} MiB, required>={threshold:.0f} MiB"
+            )
     return report
+
+
+def _recover_memory(
+    paths: Sequence[Path],
+    args: argparse.Namespace,
+    *,
+    announce: bool = False,
+) -> dict[str, Any]:
+    target = getattr(args, "memory_baseline_mib", None)
+    return _settle_memory(
+        paths,
+        announce=announce,
+        target_available_mib=target,
+        enforce_recovery=target is not None,
+    )
 
 
 def _start_backend(
@@ -482,7 +525,7 @@ def _start_backend(
                     f"  [server] retry startup {attempt + 1}/{args.max_retries}: "
                     f"{startup_error}"
                 )
-                _settle_memory(cleanup_paths, announce=False)
+                _recover_memory(cleanup_paths, args, announce=False)
                 time.sleep(1.0)
     return None, None, startup_error
 
@@ -572,7 +615,7 @@ def _run_document_with_recovery(
                     f"clean restart {attempt + 1}/{args.max_retries}"
                 )
                 current_backend.shutdown()
-                settle_report = _settle_memory(cleanup_paths, announce=False)
+                settle_report = _recover_memory(cleanup_paths, args, announce=False)
                 attempt_record["memory_settle"] = settle_report
                 restarted, restarted_rss, restart_error = _start_backend(
                     config,
@@ -655,7 +698,7 @@ def _run_config(
     backend: BenchmarkLlamaServerBackend | None = None
     rss: float | None = None
 
-    _settle_memory(cleanup_paths)
+    _recover_memory(cleanup_paths, args, announce=True)
     print(f"  [server] {config.name} · {config.runtime.signature()}")
 
     try:
@@ -694,7 +737,7 @@ def _run_config(
                 if backend is None or not backend.is_server_running:
                     if backend is not None:
                         backend.shutdown()
-                    _settle_memory(cleanup_paths, announce=False)
+                    _recover_memory(cleanup_paths, args, announce=False)
                     backend, rss, startup_error = _start_backend(
                         config,
                         output_dir,
@@ -796,7 +839,7 @@ def _run_config(
     finally:
         if backend is not None:
             backend.shutdown()
-        _settle_memory(cleanup_paths, announce=False)
+        _recover_memory(cleanup_paths, args, announce=False)
 
 
 def _aggregate(state: dict[str, Any], config: PipelineConfig, levels: Sequence[str], run_count: int) -> ConfigAggregate:
@@ -1202,6 +1245,24 @@ def main() -> int:
     if args.plan_only:
         return 0
 
+    cleanup_paths = _memory_cleanup_paths(documents)
+    baseline_report = _settle_memory(cleanup_paths, announce=True)
+    stabilization = baseline_report.get("stabilization")
+    baseline_final = stabilization.get("final") if isinstance(stabilization, dict) else None
+    args.memory_baseline_mib = (
+        float(baseline_final["mem_available_mib"])
+        if isinstance(baseline_final, dict)
+        else None
+    )
+    state["memory_session"] = {
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "baseline_available_mib": args.memory_baseline_mib,
+        "memory_isolation": MEMORY_ISOLATION_VERSION,
+    }
+    _save_state(output_dir, state)
+    if args.memory_baseline_mib is not None:
+        print(f"  [memory] session baseline={args.memory_baseline_mib:.0f} MiB available")
+
     try:
         prompt = str(state.get("chosen_prompt") or "")
         if not prompt:
@@ -1222,6 +1283,12 @@ def main() -> int:
 
         _stage_b(prompt, selected, documents, output_dir, state, args)
         _write_results(output_dir, state)
+    except MemoryRecoveryError as exc:
+        print(f"\n[benchmark] STOP memoria: {exc}")
+        print("[benchmark] Checkpoint conservato; libera RAM o riavvia e usa --resume")
+        _save_state(output_dir, state)
+        _write_results(output_dir, state)
+        return 75
     except KeyboardInterrupt:
         print("\n[benchmark] Interrotto: checkpoint conservato")
         _save_state(output_dir, state)

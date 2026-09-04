@@ -45,3 +45,14 @@ def test_failure_diagnostics_recognize_current_oom_marker(tmp_path) -> None:
     diagnostics = backend.failure_diagnostics()
 
     assert diagnostics.suspected_oom is True
+
+
+def test_stock_runtime_emits_no_tuning_flags() -> None:
+    runtime = ServerRuntimeConfig().resolved()
+    assert runtime.cli_args() == []
+    assert "stock" in runtime.signature()
+
+
+def test_explicit_runtime_emits_only_requested_overrides() -> None:
+    runtime = ServerRuntimeConfig(context_size=8192, flash_attn="off", kv_offload=False).resolved()
+    assert runtime.cli_args() == ["-c", "8192", "-fa", "off", "-nkvo"]

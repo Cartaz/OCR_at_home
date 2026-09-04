@@ -24,7 +24,7 @@ from core.llama_ocr_api import (
 from tests.benchmark.runtime_backend import (
     RuntimeCapabilities,
     ServerRuntimeConfig,
-    production_runtime_config,
+    stock_runtime_config,
     runtime_stage_a_values,
 )
 
@@ -97,7 +97,7 @@ class PipelineConfig:
     pdf_dpi: int = PDF_DPI
     max_image_dim: int = MAX_IMAGE_DIM
     jpeg_quality: int = JPEG_QUALITY
-    runtime: ServerRuntimeConfig = field(default_factory=production_runtime_config)
+    runtime: ServerRuntimeConfig = field(default_factory=stock_runtime_config)
 
     def signature(self) -> str:
         prompt_name = "text" if self.prompt == PROMPT_TEXT_RECOGNITION else "ocr"
@@ -364,7 +364,7 @@ def rotation_order(run_index: int) -> tuple[str, ...]:
 
 
 def production_baseline(prompt: str = PROMPT_LEGACY_OCR, *, name: str = "baseline") -> PipelineConfig:
-    return PipelineConfig(name=name, prompt=prompt, runtime=production_runtime_config())
+    return PipelineConfig(name=name, prompt=prompt, runtime=stock_runtime_config())
 
 
 def prompt_configs() -> list[PipelineConfig]:

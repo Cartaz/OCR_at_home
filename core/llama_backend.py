@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-from config.constants import AppConstants, AppMeta
+from config.constants import AppMeta
 from core.cancellation import CancellationToken
 from core.event_bus import EventBus
 from core.exceptions import ModelLoadError, OperationCancelledError
@@ -24,44 +24,24 @@ from core.llama_gpu_detect import (
     venv_lib_env,
 )
 from core.llama_models import ensure_gguf_models
+from core.owned_process import spawn_owned_process
 from core.llama_ocr_api import ocr_pdf, ocr_single_image
 from core.models import OCRResult
 
 logger = logging.getLogger(__name__)
 
 LLAMA_SERVER_HOST = "127.0.0.1"
-# Compatibility aliases: canonical production values live in config.constants.
-CONTEXT_SIZE = AppConstants.LLAMA_CONTEXT_SIZE
-BATCH_SIZE = AppConstants.LLAMA_BATCH_SIZE
+# ``None`` means: do not force a llama.cpp tuning value.
+CONTEXT_SIZE: None = None
+BATCH_SIZE: None = None
 N_PARALLEL = 1
 MAX_OCR_RETRIES = 1
 SYCL_DEVICE = "llama-cpp-sycl"
 
 
 def _production_runtime_args() -> list[str]:
-    """Return the benchmark-selected production runtime flags for llama-server."""
-    return [
-        "-c",
-        str(AppConstants.LLAMA_CONTEXT_SIZE),
-        "-b",
-        str(AppConstants.LLAMA_BATCH_SIZE),
-        "-ub",
-        str(AppConstants.LLAMA_UBATCH_SIZE),
-        "-t",
-        str(AppConstants.LLAMA_THREADS),
-        "-tb",
-        str(AppConstants.LLAMA_THREADS_BATCH),
-        "-fa",
-        AppConstants.LLAMA_FLASH_ATTN,
-        "-ctk",
-        AppConstants.LLAMA_CACHE_TYPE_K,
-        "-ctv",
-        AppConstants.LLAMA_CACHE_TYPE_V,
-        "--spec-type",
-        AppConstants.LLAMA_SPEC_TYPE,
-        "-kvo" if AppConstants.LLAMA_KV_OFFLOAD else "-nkvo",
-        "--op-offload" if AppConstants.LLAMA_OP_OFFLOAD else "--no-op-offload",
-    ]
+    """Return no tuning overrides so llama-server uses its native defaults."""
+    return []
 
 class LlamaServerBackend:
     """Gestisce esclusivamente un llama-server SYCL posseduto dall'app."""
@@ -69,6 +49,7 @@ class LlamaServerBackend:
     def __init__(self, preferred_device: str = SYCL_DEVICE) -> None:
         self._preferred_device = preferred_device
         self._process: subprocess.Popen[Any] | None = None
+        self._process_group_id: int | None = None
         self._process_lock = threading.RLock()
         self._server_path: str | None = None
         self._model_paths: dict[str, Path] = {}
@@ -226,8 +207,6 @@ class LlamaServerBackend:
             *_production_runtime_args(),
             "--parallel",
             str(N_PARALLEL),
-            "--cache-ram",
-            "0",
             "--metrics",
         ]
 
@@ -253,13 +232,8 @@ class LlamaServerBackend:
         log_file: Any = None
         try:
             log_file = open(log_path, "a", encoding="utf-8")
-            process = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=(os.name == "posix"),
-            )
+            handle = spawn_owned_process(cmd, stdout=log_file, env=env)
+            process = handle.process
         except Exception as exc:
             if log_file is not None:
                 try:
@@ -273,6 +247,7 @@ class LlamaServerBackend:
         with self._process_lock:
             self._log_file = log_file
             self._process = process
+            self._process_group_id = handle.process_group_id
             self._server_port = port
             self._server_url = url
 
@@ -317,31 +292,36 @@ class LlamaServerBackend:
         return max(2, min(n_cpu, max(4, n_cpu - 2)))
 
     def _stop_server(self) -> None:
-        """Termina SOLO il process group creato da questa istanza."""
+        """Terminate only this instance's owned process group, idempotently."""
         with self._process_lock:
             process = self._process
+            process_group_id = self._process_group_id
             log_file = self._log_file
             self._process = None
+            self._process_group_id = None
             self._log_file = None
             self._server_url = ""
             self._server_port = 0
 
-        if process is not None and process.poll() is None:
+        if process is not None:
             try:
-                if os.name == "posix":
-                    os.killpg(process.pid, signal.SIGTERM)
-                else:
+                if os.name == "posix" and process_group_id is not None:
+                    # Signal the group even when the leader already exited: this
+                    # also removes surviving helper children instead of orphaning them.
+                    os.killpg(process_group_id, signal.SIGTERM)
+                elif process.poll() is None:
                     process.terminate()
                 process.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
                 try:
-                    if process.poll() is None:
-                        if os.name == "posix":
-                            os.killpg(process.pid, signal.SIGKILL)
-                        else:
-                            process.kill()
-                        process.wait(timeout=3)
-                except Exception:
+                    if os.name == "posix" and process_group_id is not None:
+                        os.killpg(process_group_id, signal.SIGKILL)
+                    elif process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=3)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
             except Exception as exc:
                 logger.warning("Errore arresto llama-server: %s", exc)

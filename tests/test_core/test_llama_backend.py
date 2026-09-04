@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from core.exceptions import ModelLoadError
-from config.constants import AppConstants
 from core.llama_backend import LlamaServerBackend, _production_runtime_args
+from core.owned_process import owned_process_argv
 
 
 def test_generic_backend_is_rejected_before_startup() -> None:
@@ -43,18 +43,13 @@ def test_single_pdf_disables_whole_document_replay(monkeypatch, tmp_path: Path) 
     assert calls == 1
 
 
-def test_production_runtime_args_match_benchmark_selected_profile() -> None:
-    args = _production_runtime_args()
-    assert args == [
-        "-c", str(AppConstants.LLAMA_CONTEXT_SIZE),
-        "-b", str(AppConstants.LLAMA_BATCH_SIZE),
-        "-ub", str(AppConstants.LLAMA_UBATCH_SIZE),
-        "-t", str(AppConstants.LLAMA_THREADS),
-        "-tb", str(AppConstants.LLAMA_THREADS_BATCH),
-        "-fa", AppConstants.LLAMA_FLASH_ATTN,
-        "-ctk", AppConstants.LLAMA_CACHE_TYPE_K,
-        "-ctv", AppConstants.LLAMA_CACHE_TYPE_V,
-        "--spec-type", AppConstants.LLAMA_SPEC_TYPE,
-        "-kvo",
-        "--op-offload",
-    ]
+def test_production_runtime_args_leave_llama_cpp_tuning_stock() -> None:
+    assert _production_runtime_args() == []
+
+
+def test_linux_owned_process_uses_parent_death_exec_shim() -> None:
+    args = owned_process_argv(["/tmp/llama-server", "--version"], owner_pid=1234)
+    if __import__("os").name == "posix" and __import__("sys").platform.startswith("linux"):
+        assert args[-4:] == ["1234", "--", "/tmp/llama-server", "--version"]
+    else:
+        assert args == ["/tmp/llama-server", "--version"]

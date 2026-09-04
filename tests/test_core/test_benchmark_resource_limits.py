@@ -106,7 +106,7 @@ def test_memory_sampler_triggers_owned_process_guard_once() -> None:
     sampler.sample_now()
     metrics = sampler.to_dict()
 
-    assert MEMORY_ISOLATION_VERSION == 2
+    assert MEMORY_ISOLATION_VERSION == 3
     assert critical == [200.0]
     assert metrics["pressure_triggered"] is True
     assert metrics["critical_available_mib"] == MEMORY_PRESSURE_FLOOR_MIB

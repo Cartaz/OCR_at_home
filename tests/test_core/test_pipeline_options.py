@@ -18,10 +18,10 @@ from core.llama_ocr_api import (
 )
 
 
-def test_production_pipeline_defaults_remain_unchanged() -> None:
+def test_production_pipeline_defaults_match_benchmark_selected_profile() -> None:
     assert PDF_DPI == 150
-    assert MAX_IMAGE_DIM == 1920
-    assert JPEG_QUALITY == 85
+    assert MAX_IMAGE_DIM == 8192
+    assert JPEG_QUALITY == 80
 
 
 def test_prepare_image_payload_respects_dimension_and_quality_overrides() -> None:

@@ -1,75 +1,85 @@
-"""Desktop window hosting the local HTML frontend."""
+"""Qt Quick shell: owns the QML engine, window geometry and teardown order."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QDragEnterEvent, QDropEvent
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtCore import QEvent, QObject, QTimer, QUrl
+from PySide6.QtGui import QIcon
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
+from shiboken6 import delete
+
+from config.constants import AppMeta, UIConstraints
+from ui.backend import UiBackend
+
+QML_ROOT = Path(__file__).resolve().parent / "qml"
+SHADER_PACKAGE = QML_ROOT / "shaders" / "neumorphic.frag.qsb"
 
 
-class LocalOnlyPage(QWebEnginePage):
-    """Keep application navigation local and delegate web links to the OS."""
+class QmlMainWindow(QObject):
+    """Load ``Main.qml`` with ``backend`` and persist the window size."""
 
-    _LOCAL_SCHEMES = {"file", "qrc", "about"}
+    def __init__(self, backend: UiBackend, *, icon_path: Path | None = None) -> None:
+        super().__init__()
+        if not SHADER_PACKAGE.is_file():
+            raise RuntimeError(f"Shader QML mancante: {SHADER_PACKAGE}")
+        self._backend = backend
+        self._shutdown = False
+        self._engine = QQmlApplicationEngine(self)
+        self._engine.rootContext().setContextProperty("backend", backend)
+        self._engine.load(QUrl.fromLocalFile(str(QML_ROOT / "Main.qml")))
+        roots = self._engine.rootObjects()
+        if not roots or not isinstance(roots[0], QQuickWindow):
+            raise RuntimeError("Main.qml non ha creato una finestra Qt Quick valida")
+        self._window: QQuickWindow = roots[0]
+        self._window.setTitle(AppMeta.NAME)
+        self._window.setMinimumWidth(UIConstraints.WINDOW_MIN_WIDTH)
+        self._window.setMinimumHeight(UIConstraints.WINDOW_MIN_HEIGHT)
+        settings = backend.settings
+        self._window.resize(int(settings["window_width"]), int(settings["window_height"]))
+        if icon_path is not None and icon_path.is_file():
+            self._window.setIcon(QIcon(str(icon_path)))
 
-    def acceptNavigationRequest(
-        self,
-        url: QUrl,
-        navigation_type: QWebEnginePage.NavigationType,
-        is_main_frame: bool,
-    ) -> bool:
-        _ = navigation_type, is_main_frame
-        scheme = url.scheme().lower()
-        if scheme in self._LOCAL_SCHEMES:
-            return True
-        if scheme in {"http", "https"}:
-            QDesktopServices.openUrl(url)
-        return False
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(600)
+        self._geometry_timer.timeout.connect(self._persist_geometry)
+        self._window.installEventFilter(self)
 
+    @property
+    def window(self) -> QQuickWindow:
+        return self._window
 
-class MainWindow(QWebEngineView):
-    """QWebEngine shell restricted to the bundled local frontend."""
+    def show(self) -> None:
+        self._window.show()
 
-    files_dropped = Signal(list)
+    def restore(self) -> None:
+        self._window.showNormal()
+        self._window.raise_()
+        self._window.requestActivate()
 
-    def __init__(self, web_root: Path, parent=None) -> None:
-        super().__init__(parent)
-        self.setPage(LocalOnlyPage(self))
-        self.setAcceptDrops(True)
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt API
+        if watched is self._window and event.type() == QEvent.Type.Resize:
+            self._geometry_timer.start()
+        return super().eventFilter(watched, event)
 
-        settings = self.settings()
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
-        )
-        settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False
-        )
-
-        self.page().setBackgroundColor(QColor("#141414"))
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-        self.load(QUrl.fromLocalFile(str((web_root / "index.html").resolve())))
-
-    @staticmethod
-    def _local_drop_paths(event: QDragEnterEvent | QDropEvent) -> list[str]:
-        mime = event.mimeData()
-        if not mime.hasUrls():
-            return []
-        return [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
-
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if self._local_drop_paths(event):
-            event.acceptProposedAction()
+    def _persist_geometry(self) -> None:
+        if self._shutdown:
             return
-        event.ignore()
+        width, height = self._window.width(), self._window.height()
+        settings = self._backend.settings
+        if (width, height) != (settings["window_width"], settings["window_height"]):
+            self._backend.saveWindowSize(width, height)
 
-    def dropEvent(self, event: QDropEvent) -> None:
-        paths = self._local_drop_paths(event)
-        if not paths:
-            event.ignore()
+    def shutdown(self) -> None:
+        """Destroy QML before the backend so no binding outlives its adapter."""
+        if self._shutdown:
             return
-        self.files_dropped.emit(paths)
-        event.acceptProposedAction()
+        self._geometry_timer.stop()
+        self._persist_geometry()
+        self._shutdown = True
+        self._window.removeEventFilter(self)
+        self._window.hide()
+        delete(self._window)
+        delete(self._engine)

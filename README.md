@@ -69,13 +69,14 @@ The Qt Quick interface uses about half the memory of the former Qt WebEngine one
 .venv/bin/python -m pytest
 ```
 
-`requirements-dev.txt` adds `PySide6-Addons` only for the `qsb` shader compiler. The compiled shader `ui/qml/shaders/neumorphic.frag.qsb` is committed; after editing `neumorphic.frag`, rebuild it with:
+`requirements-dev.txt` adds `PySide6-Addons` only for the `qsb` shader compiler, needed when editing the shader. The compiled shader `ui/qml/shaders/neumorphic.frag.qsb` is committed; after editing `neumorphic.frag`, rebuild it with:
 
 ```bash
 .venv/lib/python3*/site-packages/PySide6/qsb --qt6 -o ui/qml/shaders/neumorphic.frag.qsb ui/qml/shaders/neumorphic.frag
+sha256sum ui/qml/shaders/neumorphic.frag | cut -d' ' -f1 > ui/qml/shaders/neumorphic.frag.qsb.source-sha256
 ```
 
-A test fails if the committed package does not match the source.
+`qsb` output is not byte-reproducible across machines, so the package records the hash of the source it was built from; a test fails if the source changed without a rebuild.
 
 Layout: `config/` (settings and constants), `core/` (Qt-independent application logic and the llama-server backend), `ui/` (`backend.py` holds all view state and is unit-tested; `qml/` is the thin view), `tests/`, and `benchmarks/` (the hardware-backed real-world benchmark, separate from CI inference: see `benchmarks/README.md`).
 

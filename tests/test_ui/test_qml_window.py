@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
@@ -69,21 +67,19 @@ def test_layout_breakpoints_load_cleanly(qapp, qml_messages, width) -> None:
         backend.shutdown()
 
 
-def test_compiled_shader_matches_its_source(tmp_path) -> None:
-    import PySide6
+def test_compiled_shader_was_rebuilt_from_the_current_source() -> None:
+    """qsb output is not byte-reproducible across machines, so the committed
+    package records the SHA-256 of the source it was compiled from. Editing
+    neumorphic.frag without recompiling (and updating the hash) fails here;
+    the QML tests above prove the committed package actually renders."""
+    import hashlib
 
-    # The qsb binary ships with PySide6-Addons (requirements-dev.txt); the
-    # runtime only needs the committed .qsb package.
-    qsb = Path(PySide6.__file__).parent / "qsb"
-    if not qsb.exists():
-        pytest.skip("qsb non disponibile (installa requirements-dev.txt)")
-    rebuilt = tmp_path / "neumorphic.frag.qsb"
-    subprocess.run(
-        [str(qsb), "--qt6", "-o", str(rebuilt), str(QML_ROOT / "shaders" / "neumorphic.frag")],
-        check=True,
-        capture_output=True,
-    )
-    assert rebuilt.read_bytes() == SHADER_PACKAGE.read_bytes(), (
-        "Ricompila lo shader: pyside6-qsb --qt6 -o ui/qml/shaders/neumorphic.frag.qsb "
-        "ui/qml/shaders/neumorphic.frag"
+    source = QML_ROOT / "shaders" / "neumorphic.frag"
+    recorded = (QML_ROOT / "shaders" / "neumorphic.frag.qsb.source-sha256").read_text().strip()
+    assert SHADER_PACKAGE.is_file()
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == recorded, (
+        "Ricompila lo shader e aggiorna l'hash:\n"
+        "  qsb --qt6 -o ui/qml/shaders/neumorphic.frag.qsb ui/qml/shaders/neumorphic.frag\n"
+        "  sha256sum ui/qml/shaders/neumorphic.frag | cut -d' ' -f1 "
+        "> ui/qml/shaders/neumorphic.frag.qsb.source-sha256"
     )

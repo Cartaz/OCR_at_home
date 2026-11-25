@@ -1,7 +1,8 @@
 # Runtime dependencies. Keep a tested minimum and reject unreviewed major-version jumps.
-# PySide6-Essentials ships Qt Quick, Qt Quick Controls, Shapes, Effects, Widgets
-# (tray) and the `qsb` shader compiler; the PySide6 metapackage would add
-# WebEngine/Addons that the QML interface no longer uses.
+# PySide6-Essentials ships Qt Quick, Qt Quick Controls, Shapes, Effects and
+# Widgets (tray); the PySide6 metapackage would add WebEngine/Addons that the
+# QML interface no longer uses. The compiled shader is committed, so the
+# runtime needs no shader compiler (see requirements-dev.txt).
 PySide6-Essentials>=6.9.0,<7
 Pillow>=13.0.0,<14
 numpy>=1.26.0,<3

@@ -52,15 +52,19 @@ def _marker_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.verified")
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path, cancel_token: CancellationToken | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _is_verified(path: Path, spec: ModelFile) -> bool:
+def _is_verified(
+    path: Path, spec: ModelFile, cancel_token: CancellationToken | None = None
+) -> bool:
     """Return True when ``path`` matches the pinned size and SHA-256."""
     try:
         stat = path.stat()
@@ -76,7 +80,7 @@ def _is_verified(path: Path, spec: ModelFile) -> bool:
     except OSError:
         pass
     try:
-        if _sha256(path) != spec.sha256:
+        if _sha256(path, cancel_token) != spec.sha256:
             return False
     except OSError:
         return False
@@ -87,14 +91,30 @@ def _is_verified(path: Path, spec: ModelFile) -> bool:
     return True
 
 
+# filename -> (thread, outcome) of downloads that may outlive a cancelled load.
+_DOWNLOADS: dict[str, tuple[threading.Thread, dict[str, object]]] = {}
+_DOWNLOADS_LOCK = threading.Lock()
+
+
 def _download(spec: ModelFile, cancel_token: CancellationToken | None) -> Path:
     """Download one file; cancellation returns immediately.
 
     ``hf_hub_download`` cannot be interrupted. It runs in a daemon thread so a
     cancelled load (or app shutdown) is not held hostage by a multi-GB
-    transfer; Hugging Face resumes the partial download on the next attempt.
+    transfer. The transfer itself continues in the background until it ends
+    or the app exits; a retry joins it instead of starting a parallel one.
     """
     from huggingface_hub import hf_hub_download
+
+    with _DOWNLOADS_LOCK:
+        pending = _DOWNLOADS.get(spec.filename)
+        if pending is None or not pending[0].is_alive():
+            pending = None
+    if pending is not None:
+        # A previous (cancelled) attempt is still transferring this file:
+        # wait for it instead of starting a second, lock-blocked download.
+        worker, outcome = pending
+        return _wait_download(worker, outcome, cancel_token)
 
     outcome: dict[str, object] = {}
 
@@ -110,7 +130,17 @@ def _download(spec: ModelFile, cancel_token: CancellationToken | None) -> Path:
             outcome["error"] = exc
 
     worker = threading.Thread(target=run, name=f"gguf-download-{spec.filename}", daemon=True)
+    with _DOWNLOADS_LOCK:
+        _DOWNLOADS[spec.filename] = (worker, outcome)
     worker.start()
+    return _wait_download(worker, outcome, cancel_token)
+
+
+def _wait_download(
+    worker: threading.Thread,
+    outcome: dict[str, object],
+    cancel_token: CancellationToken | None,
+) -> Path:
     while worker.is_alive():
         if cancel_token is not None and cancel_token.wait(0.25):
             raise OperationCancelledError()
@@ -133,7 +163,7 @@ def ensure_gguf_models(
         path = model_paths[key]
         if path.exists():
             EventBus.emit("model_load_progress", {"message": f"Verifica {spec.filename}..."})
-            if _is_verified(path, spec):
+            if _is_verified(path, spec, cancel_token):
                 continue
             logger.warning("GGUF incompleto o diverso dalla revisione pinnata, riscarico: %s", path)
             try:
@@ -153,7 +183,7 @@ def ensure_gguf_models(
             raise ModelLoadError(
                 GGUF_MODEL_ID, f"Impossibile scaricare {spec.filename}: {exc}"
             ) from exc
-        if not _is_verified(path, spec):
+        if not _is_verified(path, spec, cancel_token):
             raise ModelLoadError(
                 GGUF_MODEL_ID, f"{spec.filename} non corrisponde all'hash SHA-256 atteso"
             )

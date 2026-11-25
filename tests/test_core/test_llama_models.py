@@ -38,7 +38,7 @@ def test_verified_file_is_hashed_once(one_file, monkeypatch) -> None:
     (directory / spec.filename).write_bytes(content)
     hashed: list[Path] = []
     real = llama_models._sha256
-    monkeypatch.setattr(llama_models, "_sha256", lambda path: hashed.append(path) or real(path))
+    monkeypatch.setattr(llama_models, "_sha256", lambda path, token=None: hashed.append(path) or real(path, token))
     llama_models.ensure_gguf_models()
     llama_models.ensure_gguf_models()
     assert len(hashed) == 1
@@ -82,3 +82,37 @@ def test_cancel_returns_without_waiting_for_a_stuck_download(one_file, monkeypat
     with pytest.raises(OperationCancelledError):
         llama_models.ensure_gguf_models(cancel_token=token)
     stuck.set()
+
+
+def test_hashing_stops_when_the_load_is_cancelled(one_file) -> None:
+    directory, content, spec = one_file
+    (directory / spec.filename).write_bytes(content)
+    token = CancellationToken()
+    token.cancel()
+    with pytest.raises(OperationCancelledError):
+        llama_models._is_verified(directory / spec.filename, spec, token)
+
+
+def test_retry_joins_a_download_left_running_by_a_cancelled_load(one_file, monkeypatch) -> None:
+    directory, content, spec = one_file
+    release = threading.Event()
+    calls: list[int] = []
+
+    def slow_download(**kwargs):
+        calls.append(1)
+        assert release.wait(5)
+        target = Path(kwargs["local_dir"]) / kwargs["filename"]
+        target.write_bytes(content)
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", slow_download)
+    monkeypatch.setattr(llama_models, "_DOWNLOADS", {})
+    token = CancellationToken()
+    threading.Timer(0.2, token.cancel).start()
+    with pytest.raises(OperationCancelledError):
+        llama_models.ensure_gguf_models(cancel_token=token)
+
+    threading.Timer(0.2, release.set).start()
+    paths = llama_models.ensure_gguf_models()
+    assert paths["main"].read_bytes() == content
+    assert calls == [1]

@@ -1,6 +1,6 @@
 """Color tokens for native Qt surfaces (tray menu, tooltips).
 
-The QML interface has its own ``ui/qml/Theme.qml`` with the same values.
+The QML interface has its own ``ui/qml/components/Theme.qml`` with the same values.
 """
 
 from __future__ import annotations

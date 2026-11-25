@@ -190,6 +190,11 @@ class UiBackend(QObject):
         return validated
 
     def _apply_single_selection(self, path: str, display_name: str = "") -> None:
+        if path != self._single_path:
+            # Never show (or copy) a previous document's text under a new file.
+            self._single_text = ""
+            self._pdf_parts = []
+            self._single_is_pdf = False
         self._single_path = path
         self._single_name = display_name or _basename(path)
         self._single_meta = "Pronto per l'elaborazione."

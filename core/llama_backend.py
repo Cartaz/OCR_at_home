@@ -213,6 +213,11 @@ class LlamaServerBackend:
                     logger.info("llama-server avviato: SYCL full offload")
                     return
                 time.sleep(0.25)
+        except BaseException:
+            # Every failed or cancelled start (initial load or a restart during
+            # OCR) reaps the process and closes its log here.
+            self._stop_server()
+            raise
         finally:
             if cancel_token is not None:
                 cancel_token.unregister_closer(stop_owned_process)

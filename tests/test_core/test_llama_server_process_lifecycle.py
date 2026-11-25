@@ -263,3 +263,28 @@ def test_shutdown_is_idempotent_after_server_has_already_crashed(
     assert backend.is_initialized is False
     assert backend.server_url == ""
     assert backend._process is None  # type: ignore[attr-defined]
+
+
+def test_failed_restart_during_ocr_reaps_the_new_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review fix: a server start cancelled while waiting for readiness (as in
+    a restart during OCR) must not leave a process, log handle or URL behind."""
+    import core.llama_backend as llama_backend
+
+    pid_file, _child = _prepare_runtime(monkeypatch, tmp_path, spawn_child=False, health_delay=30.0)
+    backend = LlamaServerBackend()
+    backend._server_path = llama_backend.find_llama_server()  # type: ignore[attr-defined]
+    backend._model_paths = llama_backend.ensure_gguf_models()  # type: ignore[attr-defined]
+    token = CancellationToken()
+    threading.Timer(1.0, token.cancel).start()
+
+    with pytest.raises(OperationCancelledError):
+        backend._start_server(cancel_token=token)  # type: ignore[attr-defined]
+
+    assert backend._process is None  # type: ignore[attr-defined]
+    assert backend._log_file is None  # type: ignore[attr-defined]
+    assert backend.server_url == ""
+    server_pid = int(pid_file.read_text(encoding="utf-8"))
+    assert _wait_until(lambda: not _pid_exists(server_pid))

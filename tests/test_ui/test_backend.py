@@ -280,3 +280,13 @@ def test_batch_progress_hides_after_failure(make_backend, qapp) -> None:
         qapp.processEvents()
         _time.sleep(0.02)
     assert backend.batchProgressVisible is False
+
+
+def test_selecting_a_new_file_clears_the_previous_result(make_backend, tmp_path) -> None:
+    backend, _ = make_backend()
+    first = str(_image(tmp_path, "a.png").resolve())
+    backend._apply_single_selection(first)
+    EventBus.emit("ocr_completed", {"mode": "single", "image_path": first, "text": "A", "pages": []})
+    assert backend.canCopySingle is True
+    backend._apply_single_selection(str(_image(tmp_path, "b.png").resolve()))
+    assert backend.singleText == "" and backend.canCopySingle is False

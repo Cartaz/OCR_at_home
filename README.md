@@ -58,7 +58,7 @@ A malformed settings file, or a single invalid value in it, falls back to the de
 
 Single-image/PDF OCR and sequential batch OCR, cancellation, progress, manual `.txt`/`.md` saving (also one file per PDF page), optional automatic batch saving, drag & drop, clipboard images (Ctrl+V), model unload/reload, optional lazy model startup, idle auto-unload, hardware refresh, a log viewer, and deterministic shutdown of the app-owned llama-server process group.
 
-The production prompt is GLM-OCR's official `Text Recognition:` task prompt, selected by the canonical real-world benchmark (see `benchmarks/DECISION.md`); llama-server runs with llama.cpp's stock tuning defaults.
+The production prompt is GLM-OCR's official `Text Recognition:` task prompt, selected by the canonical real-world benchmark (see `benchmarks/DECISION.md`); llama-server runs with llama.cpp's stock tuning defaults. Settings → *Contesto llama-server* can cap the context (`-c`): llama.cpp's default reserves the model's full context, which on integrated GPUs can exhaust GPU memory on large documents; a smaller value such as 16384 uses far less. It applies at the next model load.
 
 The Qt Quick interface uses about half the memory of the former Qt WebEngine one (≈190 MiB PSS in one process versus ≈360 MiB in five, measured idle at 1237×836).
 

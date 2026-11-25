@@ -795,13 +795,15 @@ class UiBackend(QObject):
             "batch_save_pdf_pages",
             "load_model_at_startup",
             "model_auto_unload_minutes",
+            "llama_context_size",
         }
         overrides = {key: value for key, value in dict(values).items() if key in allowed}
-        if "model_auto_unload_minutes" in overrides:
+        for key in ("model_auto_unload_minutes", "llama_context_size"):
             # QML numbers arrive as float.
-            minutes = overrides["model_auto_unload_minutes"]
-            if isinstance(minutes, float) and minutes.is_integer():
-                overrides["model_auto_unload_minutes"] = int(minutes)
+            number = overrides.get(key)
+            if isinstance(number, float) and number.is_integer():
+                overrides[key] = int(number)
+        previous_context = self._controller.settings.llama_context_size
         try:
             self._controller.update_settings(**overrides)
         except Exception as exc:
@@ -809,7 +811,10 @@ class UiBackend(QObject):
             self._notice("Impostazioni non salvate", str(exc), "", True)
             return False
         self.settingsChanged.emit()
-        self._notice("Impostazioni salvate", "Le preferenze sono state aggiornate.")
+        message = "Le preferenze sono state aggiornate."
+        if self._model_ready and self._controller.settings.llama_context_size != previous_context:
+            message += " Il nuovo contesto si applica al prossimo caricamento: usa \"Ricarica modello\"."
+        self._notice("Impostazioni salvate", message)
         return True
 
     @Slot(int, int)

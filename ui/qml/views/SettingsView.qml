@@ -12,6 +12,7 @@ Column {
         preprocess.checked = s.preprocessing_enabled
         loadAtStartup.checked = s.load_model_at_startup
         autoUnload.selectValue(s.model_auto_unload_minutes, s.model_auto_unload_minutes + " minuti")
+        contextSize.selectValue(s.llama_context_size, s.llama_context_size + " token")
         outputDir.text = s.output_dir
         batchAutoSave.checked = s.batch_auto_save
         batchFormat.selectValue(s.batch_output_format)
@@ -22,6 +23,7 @@ Column {
             preprocessing_enabled: preprocess.checked,
             load_model_at_startup: loadAtStartup.checked,
             model_auto_unload_minutes: autoUnload.currentValue,
+            llama_context_size: contextSize.currentValue,
             output_dir: outputDir.text,
             batch_auto_save: batchAutoSave.checked,
             batch_output_format: batchFormat.currentValue,
@@ -152,6 +154,34 @@ Column {
                     width: parent.width
                     marginTop: 8
                     text: "Il timer parte quando il backend torna inattivo; un nuovo OCR ricarica automaticamente il modello."
+                    color: Theme.textMuted
+                    font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                }
+            }
+            Column {
+                width: parent.width
+                topPadding: 20
+                FieldLabel { text: "Contesto llama-server"; marginBottom: 9 }
+                NeuSelect {
+                    id: contextSize
+                    objectName: "contextSizeSelect"
+                    width: parent.width
+                    accessibleName: "Contesto llama-server"
+                    model: [
+                        { text: "Default llama.cpp", value: 0 },
+                        { text: "4096 token", value: 4096 },
+                        { text: "8192 token", value: 8192 },
+                        { text: "16384 token", value: 16384 },
+                        { text: "32768 token", value: 32768 },
+                        { text: "65536 token", value: 65536 },
+                        { text: "131072 token", value: 131072 }
+                    ]
+                }
+                CssText {
+                    width: parent.width
+                    marginTop: 8
+                    text: "Token riservati da llama-server. Valori più bassi occupano meno memoria GPU; il default di llama.cpp usa il contesto massimo del modello. Si applica al prossimo caricamento del modello."
                     color: Theme.textMuted
                     font.pixelSize: 11
                     wrapMode: Text.Wrap

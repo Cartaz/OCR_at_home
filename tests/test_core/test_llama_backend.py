@@ -86,6 +86,10 @@ def test_production_runtime_leaves_llama_cpp_tuning_stock() -> None:
     assert LlamaServerBackend()._runtime_args() == []
 
 
+def test_user_context_size_is_passed_to_llama_server() -> None:
+    assert LlamaServerBackend(context_size=16384)._runtime_args() == ["-c", "16384"]
+
+
 def test_linux_owned_process_uses_parent_death_exec_shim() -> None:
     args = owned_process_argv(["/tmp/llama-server", "--version"], owner_pid=1234)
     if __import__("os").name == "posix" and __import__("sys").platform.startswith("linux"):

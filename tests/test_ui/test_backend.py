@@ -298,3 +298,13 @@ def test_progress_uses_the_friendly_clipboard_name(make_backend, tmp_path) -> No
     backend._apply_single_selection(staged, "Immagine dagli appunti.png")
     EventBus.emit("ocr_started", {"mode": "single", "image_path": staged, "is_pdf": False})
     assert backend.singleMeta == "Elaborazione di Immagine dagli appunti.png…"
+
+
+def test_context_change_tells_the_user_to_reload(make_backend) -> None:
+    backend, controller = make_backend()
+    EventBus.emit("model_loaded", {})
+    assert backend.saveSettings({"llama_context_size": 16384.0}) is True
+    assert controller.settings.llama_context_size == 16384
+    assert "Ricarica modello" in backend.noticeMessage
+    assert backend.saveSettings({"batch_auto_save": True}) is True
+    assert "Ricarica modello" not in backend.noticeMessage

@@ -8,6 +8,7 @@
 - Ombre neumorfiche esterne e interne riprodotte con uno shader (`ui/qml/shaders/neumorphic.frag`) che applica la stessa matematica delle `box-shadow` CSS.
 - Unica differenza voluta: il pulsante di chiusura del messaggio resta in alto a destra (nel web finiva sotto i dettagli per un difetto della griglia CSS).
 - Rimossi il selettore "Lingua OCR" (mai usato dall'OCR) e la "confidenza" (llama.cpp non la fornisce).
+- Nuova impostazione "Contesto llama-server": il default resta quello di llama.cpp, ma si può limitare il contesto (es. 16384 token) per ridurre la memoria GPU; si applica al prossimo caricamento del modello.
 
 ### Bug corretti
 

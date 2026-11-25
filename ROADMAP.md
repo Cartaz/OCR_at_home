@@ -44,7 +44,7 @@ Goal: improve recognition quality using measured evidence rather than intuition.
   - formulas;
   - mixed-layout pages.
 - [x] Verify GLM-OCR prompt modes against authoritative model documentation.
-- [~] Benchmark the current `OCR` prompt against official text-recognition prompt(s).
+- [x] Benchmark the current `OCR` prompt against official text-recognition prompt(s).
   - [x] First hardware-backed synthetic baseline completed: both prompts reached CER 0.0000 on all four text samples.
   - [x] Preserve the first baseline and document why its timing comparison is order-biased.
   - [x] Run and review the repeated synthetic benchmark: 24/24 text runs reached CER 0.0000, confirming a quality tie.
@@ -56,14 +56,16 @@ Goal: improve recognition quality using measured evidence rather than intuition.
     - MEDIO: dense scanned PDF.
     - DIFFICILE: one continuous handwritten page, scored overall and separately as MAIUSCOLO / SCRIPT / CORSIVO without splitting the OCR request.
     - Five-run trimmed means, strict Markdown ground truth and cache-free timing.
-  - [ ] Run and review the canonical labelled real-world suite before changing the production default.
+  - [x] Run and review the canonical labelled real-world suite before changing the production default.
+    - The suite selected `Text Recognition:`, promoted in PR #42; see `benchmarks/DECISION.md`.
 - [ ] Add explicit OCR modes only when benchmark evidence supports them:
   - Text;
   - Formula;
   - Table;
   - structured extraction/schema mode if supported by the active backend.
   - Two specialized synthetic baselines: table output matched all cells; formula output repeatedly mistranscribed the `+/-` operator, so formula mode is not validated yet.
-- [ ] Reassess the language preference after prompt-mode work; either make it operational or remove it.
+- [x] Reassess the language preference after prompt-mode work; either make it operational or remove it.
+  - Removed in 1.1.0: GLM-OCR's prompt does not take a language and the setting never reached inference.
 
 Acceptance criteria:
 - Prompt changes have reproducible before/after results.
@@ -240,6 +242,8 @@ Goal: make installation, troubleshooting and upgrades predictable.
   - llama.cpp remains pinned separately by `install.sh`.
 - [x] Keep `CHANGELOG.md` aligned with user-visible changes.
 - [~] Periodically remove dead compatibility code and stale tests.
+  - 1.1.0 (audit in `ANALISI.md`): removed unused controller/engine APIs, multi-device scaffolding, superseded benchmark runners and source-grep tests.
+- [x] Replace the Qt WebEngine shell with a Qt Quick interface that reproduces the HTML/CSS design (about half the memory, one process).
   - The 2026-08-25 strategic cleanup removed bridge/frontend/benchmark compatibility paths that no longer represented useful abstractions.
 
 Acceptance criteria:

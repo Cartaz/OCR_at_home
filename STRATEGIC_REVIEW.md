@@ -180,3 +180,29 @@ The previously recorded deferrals remain unchanged: tiny settings writes and loc
 ### Decision after Phase 7
 
 Phase 7 is strategically complete. No additional abstraction or cleanup is justified before the next roadmap work. Continue with measured benchmark/quality work and repository maintenance, and repeat the whole-project strategic review at the next milestone boundary.
+
+## 2026-11-25 — Post-audit cleanup and Qt Quick milestone review
+
+The full audit is in `ANALISI.md`; this milestone executed all of its cleanup phases and replaced the Qt WebEngine shell with Qt Quick.
+
+### Complexity and ownership
+
+- View state moved from four JavaScript modules plus a JSON bridge into one Python adapter (`ui/backend.py`) with typed properties; QML only binds and forwards clicks. The adapter is unit-tested without a scene graph, and a real offscreen QML load is tested at three widths.
+- The "compatibility accessors" deferral of Phase 7 is resolved: unused controller/engine APIs and the multi-device/fallback scaffolding of a SYCL-only app are gone. Settings validation has a single owner (`config.settings.validate_setting`) used for loading and for updates.
+- The benchmark subclass of `LlamaServerBackend` no longer duplicates `_start_server`; it overrides runtime arguments, log path and progress message.
+- PDF pages travel as structured data from `ocr_pdf` to every consumer; the combined text is only a presentation.
+
+### Concurrency, lifecycle and failure paths
+
+- `OCREngine` no longer holds its lifecycle lock across model download/startup; a generation counter makes a load that finishes after shutdown discard its own server.
+- Real-hardware testing found that `PR_SET_PDEATHSIG` killed `llama-server` when the spawning worker thread exited, forcing a server restart on every OCR. All owned processes are now spawned from one process-lifetime thread; a regression test reproduces the thread-exit case.
+- Model downloads are cancellable from the caller's point of view, so closing the app during the first download no longer waits for it.
+
+### Tests and change amplification
+
+- About 25 tests that asserted strings in source files were deleted; contracts they hinted at are covered behaviorally (owned process groups, shutdown, log tail, settings).
+- Remaining explicit deferral: CSS-to-QML text baselines can differ by 1px where Chromium places text at fractional positions; layout boxes match exactly at 1237, 860 and 480 px.
+
+### Decision after this milestone
+
+No further structural cleanup is pending. Next work should be driven by benchmark evidence (e.g. whether llama.cpp's stock context size is the right production choice on the integrated GPU) rather than by refactoring.

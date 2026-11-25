@@ -74,12 +74,23 @@ def test_pdf_pipeline_forwards_dpi_encoding_options_and_collects_page_metrics(
     pdf.write_bytes(b"%PDF-1.4\n")
     observed: dict[str, object] = {}
 
-    monkeypatch.setattr("core.llama_ocr_api.pdf_page_count", lambda _path: 1)
+    class FakeDocument:
+        page_count = 1
 
-    def render(_path: Path, page_num: int, *, dpi: int):
-        observed["page_num"] = page_num
-        observed["dpi"] = dpi
-        return Image.new("RGB", (2200, 1400), "white")
+        def render_page(self, page_num: int, dpi: int):
+            observed["page_num"] = page_num
+            observed["dpi"] = dpi
+            return Image.new("RGB", (2200, 1400), "white")
+
+    class FakeOpen:
+        def __init__(self, _path) -> None:
+            pass
+
+        def __enter__(self):
+            return FakeDocument()
+
+        def __exit__(self, *_exc) -> None:
+            return None
 
     def api(
         _image,
@@ -100,13 +111,13 @@ def test_pdf_pipeline_forwards_dpi_encoding_options_and_collects_page_metrics(
                 "request_elapsed_s": 0.5,
             }
         )
-        return "testo", None
+        return "testo"
 
-    monkeypatch.setattr("core.llama_ocr_api.pdf_page_to_image", render)
+    monkeypatch.setattr("core.llama_ocr_api.open_pdf", FakeOpen)
     monkeypatch.setattr("core.llama_ocr_api.ocr_image_api", api)
 
     page_metrics: list[dict] = []
-    text, confidence = ocr_pdf(
+    pages = ocr_pdf(
         pdf,
         "http://127.0.0.1:9999",
         preprocessing_enabled=False,
@@ -117,8 +128,7 @@ def test_pdf_pipeline_forwards_dpi_encoding_options_and_collects_page_metrics(
         page_metrics=page_metrics,
     )
 
-    assert text == "testo"
-    assert confidence is None
+    assert pages == ["testo"]
     assert observed == {
         "page_num": 1,
         "dpi": 220,

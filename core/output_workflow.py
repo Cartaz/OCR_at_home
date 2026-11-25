@@ -1,8 +1,8 @@
 """Canonical OCR-result ownership and durable output workflow.
 
-This module owns completed single-OCR state and batch output policy. It listens
-to core events directly, so durable output does not depend on the presentation
-bridge being present. Filesystem publication remains delegated to
+This module owns the completed single-OCR result and batch output policy. It
+listens to core events directly, so durable output does not depend on the
+presentation layer being present. Filesystem publication is delegated to
 ``output_writer``.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,12 +17,7 @@ from typing import Callable
 
 from config.settings import Settings
 from core.event_bus import EventBus
-from core.output_writer import (
-    SUPPORTED_TEXT_FORMATS,
-    split_combined_pdf_text,
-    write_ocr_pages,
-    write_ocr_text,
-)
+from core.output_writer import normalize_format, write_ocr_pages, write_ocr_text
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +42,6 @@ class OutputWorkflow:
 
     _EVENTS = (
         "ocr_started",
-        "pdf_page_completed",
         "ocr_completed",
         "ocr_cancelled",
         "ocr_failed",
@@ -63,28 +56,12 @@ class OutputWorkflow:
         self._settings_provider = settings_provider
         self._lock = threading.RLock()
         self._completed_single: CompletedSingleResult | None = None
-        self._pending_pdf_pages: dict[str, dict[int, str]] = {}
-        self._pending_pdf_totals: dict[str, int] = {}
         self._batch_options: BatchOutputOptions | None = None
         self._batch_saved_count = 0
         self._batch_save_failures = 0
         self._subscriptions: list[tuple[str, Callable[[dict], None]]] = []
         self._manual_thread: threading.Thread | None = None
         self._shutdown = False
-        self._subscribe()
-
-    @staticmethod
-    def _canonical_source(source_path: str) -> str:
-        return str(Path(source_path).expanduser().resolve()) if source_path else ""
-
-    @staticmethod
-    def _normalize_format(file_format: str) -> str:
-        fmt = str(file_format).strip().lower().lstrip(".")
-        if fmt not in SUPPORTED_TEXT_FORMATS:
-            raise ValueError(f"Formato output non supportato: {file_format}")
-        return fmt
-
-    def _subscribe(self) -> None:
         for event_name in self._EVENTS:
             def handler(payload: dict, *, _event_name: str = event_name) -> None:
                 self._handle_event(_event_name, dict(payload))
@@ -92,90 +69,39 @@ class OutputWorkflow:
             EventBus.subscribe(event_name, handler)
             self._subscriptions.append((event_name, handler))
 
-    def _clear_single_state(self) -> None:
-        with self._lock:
-            self._completed_single = None
-            self._pending_pdf_pages.clear()
-            self._pending_pdf_totals.clear()
+    @staticmethod
+    def _canonical_source(source_path: str) -> str:
+        return str(Path(source_path).expanduser().resolve()) if source_path else ""
 
     def _handle_event(self, event_name: str, data: dict) -> None:
         if self._shutdown:
             return
-        if event_name == "ocr_started" and data.get("mode") == "single":
-            self._clear_single_state()
-            return
-        if event_name == "pdf_page_completed" and data.get("mode") == "single":
-            self._record_pdf_page(data)
-            return
-        if event_name == "ocr_completed" and data.get("mode") == "single":
+        single = data.get("mode") == "single"
+        if event_name in {"ocr_started", "ocr_cancelled", "ocr_failed"} and single:
+            with self._lock:
+                self._completed_single = None
+        elif event_name == "ocr_completed" and single:
             self._record_completed_single(data)
-            return
-        if event_name in {"ocr_cancelled", "ocr_failed"} and data.get("mode") == "single":
-            self._clear_single_state()
-            return
-        if event_name == "batch_started":
+        elif event_name == "batch_started":
             self._start_batch()
-            return
-        if event_name == "batch_task_completed":
+        elif event_name == "batch_task_completed":
             self._auto_save_batch_result(data)
-            return
-        if event_name == "batch_completed":
+        elif event_name == "batch_completed":
             self._finish_batch(completed=True)
-            return
-        if event_name in {"batch_cancelled", "batch_failed"}:
+        elif event_name in {"batch_cancelled", "batch_failed"}:
             self._finish_batch(completed=False)
-
-    def _record_pdf_page(self, data: dict) -> None:
-        source = self._canonical_source(str(data.get("pdf_path") or ""))
-        page_num = int(data.get("page_num") or 0)
-        total_pages = int(data.get("total_pages") or 0)
-        if not source or page_num <= 0 or total_pages <= 0 or page_num > total_pages:
-            return
-        with self._lock:
-            self._pending_pdf_pages.setdefault(source, {})[page_num] = str(
-                data.get("text") or ""
-            )
-            self._pending_pdf_totals[source] = total_pages
 
     def _record_completed_single(self, data: dict) -> None:
         source = self._canonical_source(str(data.get("image_path") or ""))
-        if not source:
-            return
-        is_pdf = bool(data.get("is_pdf"))
-        if not is_pdf:
+        result = None
+        if source:
             result = CompletedSingleResult(
                 source=source,
                 text=str(data.get("text") or ""),
+                pdf_pages=tuple(str(page) for page in data.get("pages") or ()),
             )
-            with self._lock:
-                self._completed_single = result
-            return
-
         with self._lock:
-            page_map = dict(self._pending_pdf_pages.get(source) or {})
-            total_pages = int(self._pending_pdf_totals.get(source) or 0)
-        expected = list(range(1, total_pages + 1))
-        if total_pages <= 0 or sorted(page_map) != expected:
-            logger.warning("Risultato PDF completato senza sequenza pagine canonica: %s", source)
-            self._clear_single_state()
-            return
-        pages = tuple(page_map[number] for number in expected)
-        text = (
-            pages[0]
-            if len(pages) == 1
-            else "\n\n".join(
-                f"--- Pagina {number} ---\n{page_map[number]}"
-                for number in expected
-            )
-        )
-        with self._lock:
-            self._completed_single = CompletedSingleResult(
-                source=source,
-                text=text,
-                pdf_pages=pages,
-            )
-            self._pending_pdf_pages.clear()
-            self._pending_pdf_totals.clear()
+            self._completed_single = result
 
     def _require_single(self, source_path: str) -> CompletedSingleResult:
         source = self._canonical_source(source_path)
@@ -187,34 +113,6 @@ class OutputWorkflow:
             )
         return result
 
-    def save_single_result(self, source_path: str, file_format: str) -> Path:
-        """Synchronous persistence API for tests/non-GUI integrations."""
-        result = self._require_single(source_path)
-        settings = self._settings_provider()
-        destination = write_ocr_text(
-            settings.output_dir,
-            result.source,
-            result.text,
-            file_format,
-        )
-        logger.info("Risultato OCR salvato in %s", destination)
-        return destination
-
-    def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
-        """Synchronous persistence API for tests/non-GUI integrations."""
-        result = self._require_single(source_path)
-        if not result.pdf_pages:
-            raise RuntimeError("Nessuna pagina PDF completata da salvare")
-        settings = self._settings_provider()
-        outputs = write_ocr_pages(
-            settings.output_dir,
-            result.source,
-            result.pdf_pages,
-            file_format,
-        )
-        logger.info("Salvate %d pagine OCR separate per %s", len(outputs), result.source)
-        return outputs
-
     def _start_manual_save(
         self,
         kind: str,
@@ -225,30 +123,17 @@ class OutputWorkflow:
         def run() -> None:
             try:
                 payload = write()
-                with self._lock:
-                    publish = not self._shutdown
-                if publish:
-                    EventBus.emit(
-                        "single_output_saved",
-                        {"request_id": request_id, "kind": kind, **payload},
-                    )
+                event, data = "single_output_saved", payload
             except Exception as exc:
                 logger.warning("Salvataggio manuale OCR fallito (%s): %s", kind, exc)
-                with self._lock:
-                    publish = not self._shutdown
-                if publish:
-                    EventBus.emit(
-                        "single_output_save_failed",
-                        {
-                            "request_id": request_id,
-                            "kind": kind,
-                            "error": str(exc),
-                        },
-                    )
+                event, data = "single_output_save_failed", {"error": str(exc)}
             finally:
                 with self._lock:
+                    publish = not self._shutdown
                     if self._manual_thread is threading.current_thread():
                         self._manual_thread = None
+            if publish:
+                EventBus.emit(event, {"request_id": request_id, "kind": kind, **data})
 
         thread = threading.Thread(
             target=run,
@@ -273,7 +158,7 @@ class OutputWorkflow:
     def request_save_single_result(self, source_path: str, file_format: str) -> str:
         """Snapshot canonical state and persist combined output off the caller thread."""
         result = self._require_single(source_path)
-        fmt = self._normalize_format(file_format)
+        fmt = normalize_format(file_format)
         output_dir = str(self._settings_provider().output_dir)
 
         def write() -> dict[str, object]:
@@ -288,21 +173,13 @@ class OutputWorkflow:
         result = self._require_single(source_path)
         if not result.pdf_pages:
             raise RuntimeError("Nessuna pagina PDF completata da salvare")
-        fmt = self._normalize_format(file_format)
+        fmt = normalize_format(file_format)
         output_dir = str(self._settings_provider().output_dir)
 
         def write() -> dict[str, object]:
-            outputs = write_ocr_pages(
-                output_dir,
-                result.source,
-                result.pdf_pages,
-                fmt,
-            )
+            outputs = write_ocr_pages(output_dir, result.source, result.pdf_pages, fmt)
             logger.info("Salvate %d pagine OCR separate per %s", len(outputs), result.source)
-            return {
-                "paths": [str(path) for path in outputs],
-                "count": len(outputs),
-            }
+            return {"paths": [str(path) for path in outputs], "count": len(outputs)}
 
         return self._start_manual_save("pages", write)
 
@@ -327,6 +204,7 @@ class OutputWorkflow:
 
         source = str(data.get("image_path") or "")
         text = str(data.get("text") or "")
+        pages = [str(page) for page in data.get("pages") or ()]
         if not source:
             with self._lock:
                 self._batch_save_failures += 1
@@ -345,11 +223,11 @@ class OutputWorkflow:
                 text,
                 options.file_format,
             )
-            if options.save_pdf_pages and Path(source).suffix.lower() == ".pdf":
+            if options.save_pdf_pages and pages:
                 page_paths = write_ocr_pages(
                     options.output_dir,
                     source,
-                    split_combined_pdf_text(text),
+                    pages,
                     options.file_format,
                 )
             with self._lock:
@@ -397,11 +275,11 @@ class OutputWorkflow:
                 return
             self._shutdown = True
             manual_thread = self._manual_thread
+            self._completed_single = None
 
         for event_name, handler in self._subscriptions:
             EventBus.unsubscribe(event_name, handler)
         self._subscriptions.clear()
-        self._clear_single_state()
 
         if manual_thread is not None and manual_thread.is_alive():
             manual_thread.join(timeout=max(0.0, wait_seconds))

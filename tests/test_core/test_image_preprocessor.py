@@ -25,15 +25,6 @@ def test_enhance_grayscale_input() -> None:
     assert result.dtype == np.uint8
 
 
-def test_binarize_returns_only_zero_and_255() -> None:
-    preprocessor = ImagePreprocessor()
-    gray = np.random.default_rng(3).integers(
-        0, 255, (50, 50), dtype=np.uint8
-    )
-    binary = preprocessor.binarize(gray)
-    assert set(np.unique(binary).tolist()).issubset({0, 255})
-
-
 def test_normalize_histogram_constant_image_unchanged() -> None:
     preprocessor = ImagePreprocessor()
     image = np.full((10, 10), 128, dtype=np.uint8)

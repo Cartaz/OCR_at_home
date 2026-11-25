@@ -32,7 +32,7 @@ class BlockingEngine:
     def process_image(self, _path: Path, **_kwargs: object) -> OCRResult:
         self.started.set()
         self.release.wait(timeout=3)
-        return OCRResult(text="ok", confidence=0.9)
+        return OCRResult(text="ok")
 
 
 def test_cancel_active_batch_when_no_active_job() -> None:
@@ -65,7 +65,7 @@ def test_cancelled_job_stays_active_until_worker_really_exits() -> None:
     job = manager.submit_batch([Path("a.png")])
     try:
         assert engine.started.wait(timeout=1)
-        manager.cancel_batch(job.job_id)
+        manager.cancel_active_batch()
         assert job.status == JobStatus.CANCELLED
         # La cancellazione è una richiesta: la risorsa resta occupata finché
         # il task in corso non restituisce il controllo al manager.
@@ -81,7 +81,7 @@ def test_cancelled_job_stays_active_until_worker_really_exits() -> None:
 def test_completed_batch_releases_active_job() -> None:
     class FastEngine:
         def process_image(self, _path: Path, **_kwargs: object) -> OCRResult:
-            return OCRResult(text="ok", confidence=0.9)
+            return OCRResult(text="ok")
 
     manager = ProcessManager(FastEngine())  # type: ignore[arg-type]
     job = manager.submit_batch([Path("a.png"), Path("b.png")])
@@ -96,7 +96,7 @@ def test_batch_started_is_published_before_worker_can_emit_results() -> None:
 
     class FastEngine:
         def process_image(self, _path: Path, **_kwargs: object) -> OCRResult:
-            return OCRResult(text="ok", confidence=0.9)
+            return OCRResult(text="ok")
 
     task_completed = threading.Event()
 
@@ -144,7 +144,6 @@ def test_batch_started_is_published_before_worker_can_emit_results() -> None:
         assert _wait_until(lambda: manager.active_job_id is None)
         assert job.status == JobStatus.COMPLETED
         assert events[:2] == ["batch_started", "batch_task_completed"]
-        assert manager._futures == {}
     finally:
         EventBus.unsubscribe("batch_started", capture_started)
         EventBus.unsubscribe("batch_task_completed", capture_task)

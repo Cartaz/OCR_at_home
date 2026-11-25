@@ -14,30 +14,35 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from config.constants import AppConstants
+from config.constants import OCRDefaults
 from core.cancellation import CancellationToken
 from core.event_bus import EventBus
-from core.exceptions import ImageLoadError, OperationCancelledError
+from core.exceptions import OperationCancelledError
 from core.image_preprocessor import PREPROCESS_MODES, ImagePreprocessor
-from core.image_utils import array_to_pil, load_image, pdf_page_count, pdf_page_to_image
+from core.image_utils import array_to_pil, load_image, open_pdf
 
 logger = logging.getLogger(__name__)
 
-# The canonical real-world benchmark selected the official text-recognition
-# task prompt for production on the target SYCL hardware. Other task prompts
-# remain explicit opt-ins for future table/formula workflows.
+# The canonical real-world benchmark (protocol v2, PR #42) selected the official
+# text-recognition task prompt for production on the target SYCL hardware.
+# ``OCR`` stays defined as the benchmark's historical baseline; table/formula
+# prompts remain explicit opt-ins for future workflows.
 PROMPT_LEGACY_OCR = "OCR"
 PROMPT_TEXT_RECOGNITION = "Text Recognition:"
 PROMPT_TABLE_RECOGNITION = "Table Recognition:"
 PROMPT_FORMULA_RECOGNITION = "Formula Recognition:"
 OCR_PROMPT = PROMPT_TEXT_RECOGNITION
 
-PDF_DPI = AppConstants.LLAMA_PDF_DPI
-MAX_IMAGE_DIM = AppConstants.LLAMA_MAX_IMAGE_DIM
-JPEG_QUALITY = AppConstants.LLAMA_JPEG_QUALITY
-MAX_TOKENS = AppConstants.LLAMA_MAX_TOKENS
-HTTP_TIMEOUT_S = AppConstants.LLAMA_HTTP_TIMEOUT_S
+PDF_DPI = OCRDefaults.LLAMA_PDF_DPI
+MAX_IMAGE_DIM = OCRDefaults.LLAMA_MAX_IMAGE_DIM
+JPEG_QUALITY = OCRDefaults.LLAMA_JPEG_QUALITY
+MAX_TOKENS = OCRDefaults.LLAMA_MAX_TOKENS
+HTTP_TIMEOUT_S = OCRDefaults.LLAMA_HTTP_TIMEOUT_S
 _preprocessor = ImagePreprocessor()
+
+
+class LlamaServerConnectionError(RuntimeError):
+    """The llama-server socket failed: the process may have crashed."""
 
 
 def _check_cancel(token: CancellationToken | None) -> None:
@@ -84,8 +89,8 @@ def _prepare_image_payload(
 ) -> tuple[str, dict[str, int]]:
     """Convert/resize/JPEG-encode one image and return payload diagnostics.
 
-    Production callers use the defaults. Explicit overrides exist so the manual
-    Phase 5 benchmark can evaluate the transfer/quality trade-offs without
+    Production callers use the defaults. Explicit overrides exist so the
+    hardware benchmark can evaluate transfer/quality trade-offs without
     mutating application-wide constants or persisted settings.
     """
     from PIL import Image as PILImage
@@ -132,7 +137,7 @@ def ocr_single_image(
     jpeg_quality: int = JPEG_QUALITY,
     cache_prompt: bool | None = None,
     metrics: dict[str, Any] | None = None,
-) -> tuple[str, float | None]:
+) -> str:
     _check_cancel(cancel_token)
     load_started = time.perf_counter()
     image = load_image(image_path)
@@ -181,7 +186,8 @@ def ocr_pdf(
     jpeg_quality: int = JPEG_QUALITY,
     cache_prompt: bool | None = None,
     page_metrics: list[dict[str, Any]] | None = None,
-) -> tuple[str, float | None]:
+) -> list[str]:
+    """OCR every page of a PDF and return one text per page, in order."""
     if not 72 <= int(pdf_dpi) <= 600:
         raise ValueError("pdf_dpi deve essere compreso tra 72 e 600")
     _validate_pipeline_options(
@@ -193,76 +199,70 @@ def ocr_pdf(
         preprocessing_mode=preprocessing_mode,
     )
 
-    total_pages = pdf_page_count(pdf_path)
-    if total_pages == 0:
-        raise ImageLoadError(str(pdf_path), "Il PDF non contiene pagine")
+    pages: list[str] = []
+    with open_pdf(pdf_path) as document:
+        total_pages = document.page_count
+        for page_num in range(1, total_pages + 1):
+            _check_cancel(cancel_token)
+            if emit_events:
+                EventBus.emit(
+                    "pdf_progress",
+                    {
+                        "mode": event_mode,
+                        "page_num": page_num,
+                        "total_pages": total_pages,
+                        "pdf_path": str(pdf_path),
+                    },
+                )
 
-    all_text_parts: list[str] = []
-    for page_num in range(1, total_pages + 1):
-        _check_cancel(cancel_token)
-        if emit_events:
-            EventBus.emit(
-                "pdf_progress",
-                {
-                    "mode": event_mode,
-                    "page_num": page_num,
-                    "total_pages": total_pages,
-                    "pdf_path": str(pdf_path),
-                },
+            render_started = time.perf_counter()
+            page_image = document.render_page(page_num, dpi=pdf_dpi)
+            render_elapsed_s = time.perf_counter() - render_started
+            _check_cancel(cancel_token)
+            preprocess_started = time.perf_counter()
+            image = _apply_preprocessing(page_image, mode)
+            if image is not page_image:
+                del page_image
+            preprocess_elapsed_s = time.perf_counter() - preprocess_started
+            gc.collect()
+
+            metrics: dict[str, Any] = {
+                "page_num": page_num,
+                "pdf_dpi": int(pdf_dpi),
+                "render_elapsed_s": render_elapsed_s,
+                "preprocessing_enabled": mode != "none",
+                "preprocessing_mode": mode,
+                "preprocess_elapsed_s": preprocess_elapsed_s,
+            }
+            text = ocr_image_api(
+                image,
+                server_url,
+                cancel_token=cancel_token,
+                prompt=prompt,
+                max_image_dim=max_image_dim,
+                jpeg_quality=jpeg_quality,
+                cache_prompt=cache_prompt,
+                metrics=metrics,
             )
+            if page_metrics is not None:
+                page_metrics.append(metrics)
+            del image
+            gc.collect()
+            _check_cancel(cancel_token)
 
-        render_started = time.perf_counter()
-        page_image = pdf_page_to_image(pdf_path, page_num, dpi=pdf_dpi)
-        render_elapsed_s = time.perf_counter() - render_started
-        _check_cancel(cancel_token)
-        preprocess_started = time.perf_counter()
-        image = _apply_preprocessing(page_image, mode)
-        if image is not page_image:
-            del page_image
-        preprocess_elapsed_s = time.perf_counter() - preprocess_started
-        gc.collect()
-
-        metrics: dict[str, Any] = {
-            "page_num": page_num,
-            "pdf_dpi": int(pdf_dpi),
-            "render_elapsed_s": render_elapsed_s,
-            "preprocessing_enabled": mode != "none",
-            "preprocessing_mode": mode,
-            "preprocess_elapsed_s": preprocess_elapsed_s,
-        }
-        text, _confidence = ocr_image_api(
-            image,
-            server_url,
-            cancel_token=cancel_token,
-            prompt=prompt,
-            max_image_dim=max_image_dim,
-            jpeg_quality=jpeg_quality,
-            cache_prompt=cache_prompt,
-            metrics=metrics,
-        )
-        if page_metrics is not None:
-            page_metrics.append(metrics)
-        del image
-        gc.collect()
-        _check_cancel(cancel_token)
-
-        all_text_parts.append(
-            f"--- Pagina {page_num} ---\n{text}" if total_pages > 1 else text
-        )
-        if emit_events:
-            EventBus.emit(
-                "pdf_page_completed",
-                {
-                    "mode": event_mode,
-                    "page_num": page_num,
-                    "total_pages": total_pages,
-                    "text": text,
-                    "pdf_path": str(pdf_path),
-                },
-            )
-
-    # llama-server/GLM-OCR does not expose a calibrated OCR confidence score.
-    return "\n\n".join(all_text_parts), None
+            pages.append(text)
+            if emit_events:
+                EventBus.emit(
+                    "pdf_page_completed",
+                    {
+                        "mode": event_mode,
+                        "page_num": page_num,
+                        "total_pages": total_pages,
+                        "text": text,
+                        "pdf_path": str(pdf_path),
+                    },
+                )
+    return pages
 
 
 def ocr_image_api(
@@ -275,7 +275,7 @@ def ocr_image_api(
     jpeg_quality: int = JPEG_QUALITY,
     cache_prompt: bool | None = None,
     metrics: dict[str, Any] | None = None,
-) -> tuple[str, float | None]:
+) -> str:
     _check_cancel(cancel_token)
     img_b64, payload_metrics = _prepare_image_payload(
         image,
@@ -354,10 +354,14 @@ def ocr_image_api(
         result = json.loads(raw.decode("utf-8"))
     except OperationCancelledError:
         raise
-    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+    except (OSError, http.client.HTTPException) as exc:
         if cancel_token is not None and cancel_token.is_cancelled:
             raise OperationCancelledError() from exc
-        raise RuntimeError(f"Errore comunicazione con llama-server: {exc}") from exc
+        raise LlamaServerConnectionError(
+            f"Errore comunicazione con llama-server: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Risposta non JSON da llama-server: {exc}") from exc
     finally:
         if cancel_token is not None:
             cancel_token.unregister_closer(abort_connection)
@@ -432,8 +436,4 @@ def ocr_image_api(
             elapsed,
         )
 
-    text = str(text).strip()
-    # GLM-OCR through llama.cpp returns generated text, not a calibrated
-    # confidence probability. Returning None prevents the UI/integrations from
-    # presenting an invented percentage as model output.
-    return text, None
+    return str(text).strip()

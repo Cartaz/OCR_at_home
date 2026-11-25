@@ -17,7 +17,7 @@ import pytest
 from core.cancellation import CancellationToken
 from core.exceptions import OperationCancelledError
 from core.llama_backend import LlamaServerBackend
-from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS
+from core.llama_ocr_api import LlamaServerConnectionError
 
 pytestmark = pytest.mark.skipif(
     os.name != "posix",
@@ -132,11 +132,9 @@ def _prepare_runtime(
         "core.llama_backend.ensure_gguf_models",
         lambda **_kwargs: {"main": main_model, "mmproj": mmproj_model},
     )
-    monkeypatch.setattr(
-        "core.llama_backend.detect_gpu_backend",
-        lambda _device: (GPU_OFFLOAD_ALL_LAYERS, "sycl"),
-    )
-    monkeypatch.setattr("core.llama_backend.venv_lib_env", lambda: dict(env))
+    monkeypatch.setattr("core.llama_backend.list_sycl_devices", lambda _path: ["SYCL0: fake"])
+    monkeypatch.setattr("core.llama_backend.sycl_runtime_env", lambda: dict(env))
+    monkeypatch.setattr(LlamaServerBackend, "_log_path", lambda self: tmp_path / "llama-server.log")
     return pid_file, child_pid_file
 
 
@@ -226,8 +224,8 @@ def test_server_crash_during_image_ocr_restarts_and_retries_once(
             assert process is not None
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=3)
-            raise ConnectionResetError("connection reset by peer")
-        return "retry-ok", None
+            raise LlamaServerConnectionError("connection reset by peer")
+        return "retry-ok"
 
     monkeypatch.setattr("core.llama_backend.ocr_single_image", flaky_ocr)
     image = tmp_path / "page.png"

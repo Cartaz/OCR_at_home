@@ -1,39 +1,40 @@
-"""Test del rilevamento SYCL-only di llama.cpp."""
+"""SYCL detection relies only on `llama-server --list-devices`."""
 
 from types import SimpleNamespace
 
 from core import llama_gpu_detect
 
 
-def test_sycl_list_devices_is_authoritative(monkeypatch) -> None:
+def _run(stdout: str, returncode: int = 0):
+    return lambda *a, **k: SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+
+def test_sycl_devices_are_parsed_from_list_devices(monkeypatch) -> None:
     monkeypatch.setattr(
-        llama_gpu_detect,
-        "_list_devices_text",
-        lambda _path: "Available devices:\n  SYCL0: Intel(R) Arc Graphics\n",
+        llama_gpu_detect.subprocess,
+        "run",
+        _run("Available devices:\n  SYCL0: Intel(R) Arc(TM) Graphics (14027 MiB, 14027 MiB free)\n"),
     )
-    assert llama_gpu_detect._check_sycl("/fake/llama-server") is True
+    assert llama_gpu_detect.list_sycl_devices("/fake") == [
+        "SYCL0: Intel(R) Arc(TM) Graphics (14027 MiB, 14027 MiB free)"
+    ]
 
 
-def test_generic_backend_request_is_rejected_without_cpu_or_vulkan(monkeypatch) -> None:
-    monkeypatch.setattr(llama_gpu_detect, "find_llama_server", lambda: "/fake/server")
-    monkeypatch.setattr(llama_gpu_detect, "_check_sycl", lambda _path: True)
-    layers, backend = llama_gpu_detect.detect_gpu_backend("llama-cpp")
-    assert layers == 0
-    assert backend == "unavailable"
+def test_cpu_or_vulkan_only_builds_are_not_sycl(monkeypatch) -> None:
+    monkeypatch.setattr(llama_gpu_detect.subprocess, "run", _run("Available devices:\n  Vulkan0: Intel\n"))
+    assert llama_gpu_detect.list_sycl_devices("/fake") == []
 
 
-def test_no_sycl_returns_unavailable(monkeypatch) -> None:
-    monkeypatch.setattr(llama_gpu_detect, "find_llama_server", lambda: "/fake/server")
-    monkeypatch.setattr(llama_gpu_detect, "_check_sycl", lambda _path: False)
-    layers, backend = llama_gpu_detect.detect_gpu_backend("llama-cpp-sycl")
-    assert layers == 0
-    assert backend == "unavailable"
+def test_failing_probe_is_not_a_device(monkeypatch) -> None:
+    monkeypatch.setattr(llama_gpu_detect.subprocess, "run", _run("SYCL0: x", returncode=1))
+    assert llama_gpu_detect.list_sycl_devices("/fake") == []
+    assert llama_gpu_detect.list_sycl_devices(None) == []
 
 
-def test_intel_display_controller_is_detected(monkeypatch) -> None:
-    result = SimpleNamespace(
-        returncode=0,
-        stdout="00:02.0 Display controller: Intel Corporation Meteor Lake-P [Intel Arc Graphics]\n",
-    )
-    monkeypatch.setattr(llama_gpu_detect.subprocess, "run", lambda *a, **k: result)
-    assert llama_gpu_detect._intel_gpu_present() is True
+def test_runtime_env_respects_a_user_device_selector(monkeypatch) -> None:
+    monkeypatch.setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:1")
+    assert llama_gpu_detect.sycl_runtime_env()["ONEAPI_DEVICE_SELECTOR"] == "level_zero:1"
+    monkeypatch.delenv("ONEAPI_DEVICE_SELECTOR")
+    env = llama_gpu_detect.sycl_runtime_env()
+    assert env["ONEAPI_DEVICE_SELECTOR"] == "level_zero:0"
+    assert env["GGML_SYCL"] == "1"

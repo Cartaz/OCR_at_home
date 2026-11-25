@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from config.constants import AppConstants
 
+from config.constants import OCRDefaults
 
 PREPROCESS_MODES: frozenset[str] = frozenset({"none", "contrast", "resize", "full"})
 
@@ -22,9 +22,8 @@ class ImagePreprocessor:
     ) -> NDArray[np.uint8]:
         """Apply one explicit preprocessing mode.
 
-        The extra modes are primarily used by the hardware benchmark so resize
-        and contrast can be measured independently. ``full`` is byte-for-byte
-        equivalent to the historical/production ``enhance`` path.
+        The extra modes are used by the hardware benchmark so resize and
+        contrast can be measured independently. ``full`` is the production path.
         """
         normalized = str(mode).strip().lower()
         if normalized not in PREPROCESS_MODES:
@@ -40,14 +39,9 @@ class ImagePreprocessor:
             result = self._enhance_contrast(result)
         return result
 
-    def binarize(self, image: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        gray = self._to_grayscale(image) if image.ndim == 3 else image
-        threshold = self._otsu_threshold(gray)
-        return np.where(gray > threshold, np.uint8(255), np.uint8(0))
-
     def _resize_if_needed(self, image: NDArray[np.uint8]) -> NDArray[np.uint8]:
         h, w = image.shape[:2]
-        max_dim = AppConstants.PREPROCESS_MAX_DIMENSION
+        max_dim = OCRDefaults.PREPROCESS_MAX_DIMENSION
         if max(h, w) <= max_dim:
             return image
         scale = max_dim / max(h, w)
@@ -85,27 +79,3 @@ class ImagePreprocessor:
         weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
         gray = np.dot(image.astype(np.float32), weights)
         return np.clip(gray, 0, 255).astype(np.uint8)
-
-    @staticmethod
-    def _otsu_threshold(image: NDArray[np.uint8]) -> float:
-        histogram = np.bincount(image.ravel(), minlength=256).astype(np.float32)
-        total = image.size
-        if total == 0:
-            return 128.0
-        sum_total = np.dot(np.arange(256), histogram)
-        sum_bg = weight_bg = max_variance = best_threshold = 0.0
-        for threshold in range(256):
-            weight_bg += histogram[threshold]
-            if weight_bg == 0:
-                continue
-            weight_fg = total - weight_bg
-            if weight_fg == 0:
-                break
-            sum_bg += threshold * histogram[threshold]
-            mean_bg = sum_bg / weight_bg
-            mean_fg = (sum_total - sum_bg) / weight_fg
-            variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
-            if variance > max_variance:
-                max_variance = variance
-                best_threshold = float(threshold)
-        return best_threshold

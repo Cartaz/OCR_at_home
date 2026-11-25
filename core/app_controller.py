@@ -14,13 +14,13 @@ from config.settings import Settings
 from core.cancellation import CancellationToken
 from core.event_bus import EventBus
 from core.exceptions import (
-    HardwareNotAvailableError,
     OCREngineNotInitializedError,
     OperationBusyError,
     OperationCancelledError,
 )
 from core.hardware_detector import HardwareDetector
-from core.models import BatchOCRJob, HardwareInfo, OCRResult
+from core.image_utils import is_pdf
+from core.models import BatchOCRJob
 from core.ocr_engine import OCREngine
 from core.output_workflow import OutputWorkflow
 from core.process_manager import ProcessManager
@@ -36,6 +36,7 @@ OP_SHUTTING_DOWN = "shutting_down"
 
 _PENDING_OCR = "ocr"
 _PENDING_BATCH = "batch"
+_JOIN_TIMEOUT_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -44,84 +45,12 @@ class _PendingUserOperation:
     paths: tuple[Path, ...]
 
 
-class _OCRWorker:
-    """Worker thread per un singolo documento OCR."""
-
-    def __init__(
-        self,
-        engine: OCREngine,
-        image_path: Path,
-        task_id: str,
-        token: CancellationToken,
-        preprocessing_enabled: bool,
-        on_finished: Callable[[], None],
-    ) -> None:
-        self._engine = engine
-        self._image_path = image_path
-        self._task_id = task_id
-        self._token = token
-        self._preprocessing_enabled = preprocessing_enabled
-        self._on_finished = on_finished
-
-    def run(self) -> None:
-        from core.image_utils import is_pdf
-
-        is_pdf_file = is_pdf(self._image_path)
-        EventBus.emit(
-            "ocr_started",
-            {
-                "mode": "single",
-                "task_id": self._task_id,
-                "is_pdf": is_pdf_file,
-                "image_path": str(self._image_path),
-            },
-        )
-        try:
-            result = self._engine.process_image(
-                self._image_path,
-                mode="single",
-                cancel_token=self._token,
-                preprocessing_enabled=self._preprocessing_enabled,
-            )
-            self._token.raise_if_cancelled()
-            EventBus.emit(
-                "ocr_completed",
-                {
-                    "mode": "single",
-                    "task_id": self._task_id,
-                    "text": "" if is_pdf_file else result.text,
-                    "confidence": result.confidence,
-                    "time_ms": result.processing_time_ms,
-                    "is_pdf": is_pdf_file,
-                    "pages_streamed": is_pdf_file,
-                    "image_path": str(self._image_path),
-                },
-            )
-        except OperationCancelledError:
-            EventBus.emit(
-                "ocr_cancelled",
-                {"mode": "single", "task_id": self._task_id},
-            )
-        except Exception as exc:
-            logger.exception("OCR fallito per %s", self._image_path)
-            EventBus.emit(
-                "ocr_failed",
-                {
-                    "mode": "single",
-                    "task_id": self._task_id,
-                    "error": str(exc),
-                },
-            )
-        finally:
-            self._on_finished()
-
-
 class AppController:
     """Own application operations, hardware/model lifecycle and canonical services."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, engine: OCREngine | None = None) -> None:
         self._settings = settings
-        self._engine = OCREngine()
+        self._engine = engine or OCREngine()
         self._hardware_detector = HardwareDetector()
         self._operation_lock = threading.RLock()
         self._operation = OP_IDLE
@@ -151,47 +80,19 @@ class AppController:
         return self._settings
 
     @property
-    def engine(self) -> OCREngine:
-        """Compatibility access; presentation code should prefer focused snapshots."""
-        return self._engine
-
-    @property
-    def hardware_detector(self) -> HardwareDetector:
-        return self._hardware_detector
-
-    @property
-    def process_manager(self) -> ProcessManager:
-        """Compatibility access; presentation code should prefer active_batch_id."""
-        return self._process_manager
-
-    @property
     def operation(self) -> str:
         with self._operation_lock:
             return self._operation
-
-    @property
-    def is_busy(self) -> bool:
-        return self.operation != OP_IDLE
-
-    @property
-    def is_model_loading(self) -> bool:
-        return self.operation == OP_MODEL_LOADING
 
     @property
     def model_ready(self) -> bool:
         return self._engine.is_initialized
 
     @property
-    def model_device(self) -> str:
-        return self._engine.device
-
-    @property
-    def model_backend(self) -> str:
-        return self._engine.backend
-
-    @property
     def active_batch_id(self) -> str | None:
         return self._process_manager.active_job_id
+
+    # --- operation state ------------------------------------------------------
 
     def _begin_operation(self, operation: str) -> None:
         with self._operation_lock:
@@ -204,21 +105,13 @@ class AppController:
 
     def _finish_operation(self, operation: str) -> None:
         with self._operation_lock:
-            if self._shutdown_started:
-                return
-            if self._operation != operation:
+            if self._shutdown_started or self._operation != operation:
                 return
             self._operation = OP_IDLE
             self._idle_since = time.monotonic()
         EventBus.emit("operation_changed", {"operation": OP_IDLE})
 
-    def _prepare_model_load(self, device: str) -> CancellationToken:
-        self._begin_operation(OP_MODEL_LOADING)
-        token = CancellationToken()
-        with self._operation_lock:
-            self._model_load_token = token
-        EventBus.emit("model_loading", {"device": device})
-        return token
+    # --- hardware ---------------------------------------------------------------
 
     def _start_hardware_worker(
         self,
@@ -252,7 +145,7 @@ class AppController:
             return True
 
     def request_initialize(self) -> bool:
-        """Initialize hardware/model policy asynchronously; safe for the Qt bridge."""
+        """Initialize hardware/model policy asynchronously; safe for the Qt thread."""
         if self._initialized:
             return False
         return self._start_hardware_worker(
@@ -266,12 +159,9 @@ class AppController:
         if self.operation != OP_IDLE:
             raise OperationBusyError(self.operation)
 
-        def refresh() -> None:
-            self._hardware_detector.detect(refresh=True)
-
         started = self._start_hardware_worker(
             name="hardware-refresh-worker",
-            task=refresh,
+            task=lambda: self._hardware_detector.detect(refresh=True),
             failure_event="hardware_refresh_failed",
         )
         if started:
@@ -279,53 +169,61 @@ class AppController:
         return started
 
     def initialize(self) -> None:
-        """Detect hardware and asynchronously apply the configured startup policy."""
+        """Detect the backend and apply the configured startup policy."""
         if self._initialized:
             return
-
-        devices = self._hardware_detector.detect()
-        default_device = self._settings.default_device
-        configured_available = any(
-            device.device_type == default_device and device.available
-            for device in devices
-        )
-
-        if not configured_available:
-            fallback = self._hardware_detector.get_default()
-            if fallback.available:
-                default_device = fallback.device_type
-                self._settings = self._settings.with_(default_device=default_device)
-                self._settings.save()
-            else:
-                logger.warning(
-                    "Nessun backend llama.cpp disponibile; mantengo device configurato=%s",
-                    default_device,
-                )
-
+        status = self._hardware_detector.detect()
+        if not status.available:
+            logger.warning("Backend SYCL non disponibile: %s", status.label)
         if self._settings.load_model_at_startup:
-            self.request_model_load(default_device)
+            # Even without a detected device the load is attempted: it fails
+            # with the precise reason, which the UI then shows to the user.
+            # A failure to start the worker leaves initialization retryable.
+            self.request_model_load()
             self._initialized = True
         else:
             self._initialized = True
-            EventBus.emit(
-                "model_unloaded",
-                {"device": default_device, "reason": "startup_disabled"},
-            )
+            EventBus.emit("model_unloaded", {"reason": "startup_disabled"})
 
-    def request_model_load(self, device: str) -> None:
+    # --- model lifecycle --------------------------------------------------------
+
+    def request_model_load(self) -> None:
         """Start one asynchronous model load owned by the controller."""
-        self._prepare_model_load(device)
+        self._begin_operation(OP_MODEL_LOADING)
+        token = CancellationToken()
+        with self._operation_lock:
+            self._model_load_token = token
+        EventBus.emit("model_loading", {})
         try:
-            self._start_model_load_worker(device)
+            self._start_model_worker("model-load-worker", lambda: self._run_model_load(token))
         except Exception:
             with self._operation_lock:
                 self._model_load_token = None
             self._finish_operation(OP_MODEL_LOADING)
             raise
 
-    def _perform_model_load(self, device: str, token: CancellationToken) -> None:
-        self._engine.initialize(device=device, cancel_token=token)
-        token.raise_if_cancelled()
+    def _run_model_load(self, token: CancellationToken) -> None:
+        succeeded = False
+        try:
+            self._engine.initialize(cancel_token=token)
+            token.raise_if_cancelled()
+            EventBus.emit("model_loaded", {})
+            succeeded = True
+        except OperationCancelledError:
+            self._clear_pending_user_operation()
+            EventBus.emit("model_load_cancelled", {})
+        except Exception as exc:
+            self._clear_pending_user_operation()
+            logger.exception("Caricamento modello fallito")
+            EventBus.emit("model_load_failed", {"error": str(exc)})
+        finally:
+            with self._operation_lock:
+                if self._model_load_token is token:
+                    self._model_load_token = None
+            self._release_model_worker()
+            self._finish_operation(OP_MODEL_LOADING)
+        if succeeded:
+            self._resume_pending_user_operation()
 
     def _release_model_worker(self) -> None:
         """Release async model-worker ownership before publishing idle state."""
@@ -333,52 +231,13 @@ class AppController:
             if self._model_thread is threading.current_thread():
                 self._model_thread = None
 
-    def _start_model_load_worker(self, device: str) -> None:
+    def _start_model_worker(self, name: str, target: Callable[[], None]) -> None:
         with self._model_thread_lock:
             if self._shutdown_started:
                 raise OperationBusyError(OP_SHUTTING_DOWN)
             if self._model_thread is not None and self._model_thread.is_alive():
-                raise OperationBusyError(OP_MODEL_LOADING)
-
-            def load() -> None:
-                succeeded = False
-                with self._operation_lock:
-                    token = self._model_load_token
-                assert token is not None
-                try:
-                    self._perform_model_load(device, token)
-                    EventBus.emit(
-                        "model_loaded",
-                        {
-                            "device": self.model_device,
-                            "backend": self.model_backend,
-                        },
-                    )
-                    succeeded = True
-                except OperationCancelledError:
-                    self._clear_pending_user_operation()
-                    EventBus.emit("model_load_cancelled", {"device": device})
-                except Exception as exc:
-                    self._clear_pending_user_operation()
-                    logger.exception("Caricamento modello fallito")
-                    EventBus.emit(
-                        "model_load_failed",
-                        {"device": device, "error": str(exc)},
-                    )
-                finally:
-                    with self._operation_lock:
-                        if self._model_load_token is token:
-                            self._model_load_token = None
-                    self._release_model_worker()
-                    self._finish_operation(OP_MODEL_LOADING)
-                if succeeded:
-                    self._resume_pending_user_operation()
-
-            thread = threading.Thread(
-                target=load,
-                name="model-load-worker",
-                daemon=True,
-            )
+                raise OperationBusyError(self.operation)
+            thread = threading.Thread(target=target, name=name, daemon=True)
             self._model_thread = thread
             thread.start()
 
@@ -388,100 +247,46 @@ class AppController:
         if token is not None:
             token.cancel()
 
-    def load_model_sync(self, device: str) -> None:
-        """Load the model in the calling thread; async ownership stays above it."""
-        with self._operation_lock:
-            token = self._model_load_token
-            active = self._operation
-
-        if active == OP_IDLE:
-            self._begin_operation(OP_MODEL_LOADING)
-            token = CancellationToken()
-            with self._operation_lock:
-                self._model_load_token = token
-        elif active != OP_MODEL_LOADING:
-            raise OperationBusyError(active)
-
-        assert token is not None
-        try:
-            self._perform_model_load(device, token)
-        finally:
-            with self._operation_lock:
-                if self._model_load_token is token:
-                    self._model_load_token = None
-            self._finish_operation(OP_MODEL_LOADING)
-
     def request_model_unload(self) -> bool:
         """Start model unload off-GUI; return False when already unloaded."""
         if not self._engine.is_initialized:
-            EventBus.emit(
-                "model_unloaded",
-                {"device": self._settings.default_device, "reason": "already_unloaded"},
-            )
+            EventBus.emit("model_unloaded", {"reason": "already_unloaded"})
             return False
         self._begin_operation(OP_MODEL_UNLOADING)
-        EventBus.emit(
-            "model_unloading",
-            {"device": self._engine.device},
-        )
+        EventBus.emit("model_unloading", {})
+
+        def unload() -> None:
+            try:
+                self._engine.shutdown()
+                EventBus.emit("model_unloaded", {"reason": "requested"})
+            except Exception as exc:
+                logger.exception("Scaricamento modello fallito")
+                EventBus.emit("model_unload_failed", {"error": str(exc)})
+            finally:
+                self._release_model_worker()
+                self._finish_operation(OP_MODEL_UNLOADING)
+
         try:
-            self._start_model_unload_worker()
+            self._start_model_worker("model-unload-worker", unload)
         except Exception:
             self._finish_operation(OP_MODEL_UNLOADING)
             raise
         return True
 
-    def _perform_model_unload(self) -> None:
-        self._engine.shutdown()
+    def check_idle_model_unload(self, *, now: float | None = None) -> bool:
+        """Apply configured idle-unload policy; safe to call from a Qt timer."""
+        minutes = int(self._settings.model_auto_unload_minutes)
+        if minutes <= 0 or self.operation != OP_IDLE or not self.model_ready:
+            return False
+        current = time.monotonic() if now is None else float(now)
+        with self._operation_lock:
+            idle_since = self._idle_since
+        if current - idle_since < minutes * 60:
+            return False
+        logger.info("Auto-unload modello dopo %d minuti di inattività", minutes)
+        return self.request_model_unload()
 
-    def _start_model_unload_worker(self) -> None:
-        with self._model_thread_lock:
-            if self._shutdown_started:
-                raise OperationBusyError(OP_SHUTTING_DOWN)
-            if self._model_thread is not None and self._model_thread.is_alive():
-                raise OperationBusyError(self.operation)
-
-            def unload() -> None:
-                try:
-                    self._perform_model_unload()
-                    EventBus.emit(
-                        "model_unloaded",
-                        {
-                            "device": self._settings.default_device,
-                            "reason": "requested",
-                        },
-                    )
-                except Exception as exc:
-                    logger.exception("Scaricamento modello fallito")
-                    EventBus.emit("model_unload_failed", {"error": str(exc)})
-                finally:
-                    self._release_model_worker()
-                    self._finish_operation(OP_MODEL_UNLOADING)
-
-            thread = threading.Thread(
-                target=unload,
-                name="model-unload-worker",
-                daemon=True,
-            )
-            self._model_thread = thread
-            thread.start()
-
-    def unload_model_sync(self) -> None:
-        """Release the backend in the calling thread."""
-        active = self.operation
-        if active == OP_IDLE:
-            self._begin_operation(OP_MODEL_UNLOADING)
-        elif active != OP_MODEL_UNLOADING:
-            raise OperationBusyError(active)
-
-        try:
-            self._perform_model_unload()
-            EventBus.emit(
-                "model_unloaded",
-                {"device": self._settings.default_device, "reason": "requested"},
-            )
-        finally:
-            self._finish_operation(OP_MODEL_UNLOADING)
+    # --- queued operations ------------------------------------------------------
 
     def _queue_user_operation(self, pending: _PendingUserOperation) -> None:
         with self._operation_lock:
@@ -491,7 +296,7 @@ class AppController:
                 raise OperationBusyError(self._operation)
             self._pending_user_operation = pending
         try:
-            self.request_model_load(self._settings.default_device)
+            self.request_model_load()
         except Exception:
             self._clear_pending_user_operation()
             raise
@@ -500,23 +305,17 @@ class AppController:
         with self._operation_lock:
             self._pending_user_operation = None
 
-    def _take_pending_user_operation(self) -> _PendingUserOperation | None:
+    def _resume_pending_user_operation(self) -> None:
         with self._operation_lock:
             pending = self._pending_user_operation
             self._pending_user_operation = None
-            return pending
-
-    def _resume_pending_user_operation(self) -> None:
-        pending = self._take_pending_user_operation()
         if pending is None or self._shutdown_started:
             return
         try:
             if pending.kind == _PENDING_OCR:
                 self.start_ocr(pending.paths[0])
-            elif pending.kind == _PENDING_BATCH:
-                self.run_batch(list(pending.paths))
             else:
-                raise RuntimeError(f"Operazione accodata sconosciuta: {pending.kind}")
+                self.run_batch(list(pending.paths))
         except Exception as exc:
             logger.exception("Operazione accodata dopo model load fallita")
             EventBus.emit(
@@ -544,34 +343,7 @@ class AppController:
         self._queue_user_operation(_PendingUserOperation(_PENDING_BATCH, paths))
         return True, None
 
-    def check_idle_model_unload(self, *, now: float | None = None) -> bool:
-        """Apply configured idle-unload policy; safe to call from a Qt timer."""
-        minutes = int(self._settings.model_auto_unload_minutes)
-        if minutes <= 0 or not self.model_ready or self.operation != OP_IDLE:
-            return False
-        current = time.monotonic() if now is None else float(now)
-        with self._operation_lock:
-            idle_since = self._idle_since
-        if current - idle_since < minutes * 60:
-            return False
-        logger.info("Auto-unload modello dopo %d minuti di inattività", minutes)
-        return self.request_model_unload()
-
-    def run_ocr(self, image_path: Path) -> OCRResult:
-        """API sincrona usata soprattutto da test e integrazioni."""
-        if not self._engine.is_initialized:
-            raise OCREngineNotInitializedError()
-        self._begin_operation(OP_OCR)
-        token = CancellationToken()
-        try:
-            return self._engine.process_image(
-                Path(image_path),
-                mode="single",
-                cancel_token=token,
-                preprocessing_enabled=self._settings.preprocessing_enabled,
-            )
-        finally:
-            self._finish_operation(OP_OCR)
+    # --- OCR ----------------------------------------------------------------------
 
     def start_ocr(self, image_path: Path) -> None:
         if not self._engine.is_initialized:
@@ -581,27 +353,46 @@ class AppController:
         self._begin_operation(OP_OCR)
         token = CancellationToken()
         task_id = path.stem + "-" + uuid.uuid4().hex[:6]
+        preprocessing_enabled = self._settings.preprocessing_enabled
 
-        def finished() -> None:
-            with self._operation_lock:
-                if self._ocr_token is token:
-                    self._ocr_token = None
-                self._ocr_thread = None
-            self._finish_operation(OP_OCR)
+        def run() -> None:
+            pdf = is_pdf(path)
+            base = {"mode": "single", "task_id": task_id, "image_path": str(path)}
+            EventBus.emit("ocr_started", {**base, "is_pdf": pdf})
+            try:
+                result = self._engine.process_image(
+                    path,
+                    mode="single",
+                    cancel_token=token,
+                    preprocessing_enabled=preprocessing_enabled,
+                )
+                token.raise_if_cancelled()
+                EventBus.emit(
+                    "ocr_completed",
+                    {
+                        **base,
+                        "text": result.text,
+                        "pages": list(result.pages),
+                        "time_ms": result.processing_time_ms,
+                        "is_pdf": pdf,
+                    },
+                )
+            except OperationCancelledError:
+                EventBus.emit("ocr_cancelled", {"mode": "single", "task_id": task_id})
+            except Exception as exc:
+                logger.exception("OCR fallito per %s", path)
+                EventBus.emit(
+                    "ocr_failed",
+                    {"mode": "single", "task_id": task_id, "error": str(exc)},
+                )
+            finally:
+                with self._operation_lock:
+                    if self._ocr_token is token:
+                        self._ocr_token = None
+                        self._ocr_thread = None
+                self._finish_operation(OP_OCR)
 
-        worker = _OCRWorker(
-            self._engine,
-            path,
-            task_id,
-            token,
-            self._settings.preprocessing_enabled,
-            finished,
-        )
-        thread = threading.Thread(
-            target=worker.run,
-            name=f"ocr-worker-{task_id}",
-            daemon=True,
-        )
+        thread = threading.Thread(target=run, name=f"ocr-worker-{task_id}", daemon=True)
         with self._operation_lock:
             self._ocr_token = token
             self._ocr_thread = thread
@@ -638,59 +429,20 @@ class AppController:
     def _on_batch_finished(self, _job_id: str) -> None:
         self._finish_operation(OP_BATCH)
 
-    def cancel_batch(self, job_id: str) -> None:
-        self._process_manager.cancel_batch(job_id)
-
     def cancel_active_batch(self) -> None:
         self._process_manager.cancel_active_batch()
 
-    def get_available_devices(self, *, refresh: bool = False) -> list[HardwareInfo]:
-        return self._hardware_detector.detect(refresh=refresh)
-
-    def switch_device(self, device_type: str) -> None:
-        """Persist a validated device choice and asynchronously reload it."""
-        devices = self._hardware_detector.detect()
-        if not any(
-            device.device_type == device_type and device.available
-            for device in devices
-        ):
-            raise HardwareNotAvailableError(device_type)
-
-        if (
-            self._engine.is_initialized
-            and self._engine.device == device_type
-            and self.operation == OP_IDLE
-        ):
-            if self._settings.default_device != device_type:
-                self._settings = self._settings.with_(default_device=device_type)
-                self._settings.save()
-            return
-
-        previous = self._settings
-        self._settings = self._settings.with_(default_device=device_type)
-        try:
-            self._settings.save()
-            EventBus.emit("config_changed", {"default_device": device_type})
-            self.request_model_load(device_type)
-        except Exception:
-            self._settings = previous
-            raise
+    # --- settings and output ----------------------------------------------------
 
     def update_settings(self, **overrides: object) -> None:
-        self._settings = self._settings.with_(**overrides)
-        self._settings.save()
+        """Validate, persist and publish settings; invalid values raise ``ValueError``."""
+        updated = self._settings.with_(**overrides)
+        updated.save()
+        self._settings = updated
         if "model_auto_unload_minutes" in overrides:
             with self._operation_lock:
                 self._idle_since = time.monotonic()
-        EventBus.emit("config_changed", overrides)
-
-    def save_single_result(self, source_path: str, file_format: str) -> Path:
-        """Persist the canonical completed single-OCR result synchronously."""
-        return self._output_workflow.save_single_result(source_path, file_format)
-
-    def save_single_pdf_pages(self, source_path: str, file_format: str) -> list[Path]:
-        """Persist canonical page texts synchronously."""
-        return self._output_workflow.save_single_pdf_pages(source_path, file_format)
+        EventBus.emit("config_changed", dict(overrides))
 
     def request_save_single_result(self, source_path: str, file_format: str) -> str:
         """Queue canonical combined output without blocking the caller thread."""
@@ -698,10 +450,9 @@ class AppController:
 
     def request_save_single_pdf_pages(self, source_path: str, file_format: str) -> str:
         """Queue canonical PDF page outputs without blocking the caller thread."""
-        return self._output_workflow.request_save_single_pdf_pages(
-            source_path,
-            file_format,
-        )
+        return self._output_workflow.request_save_single_pdf_pages(source_path, file_format)
+
+    # --- shutdown -----------------------------------------------------------------
 
     def shutdown(self) -> None:
         """Cancel operations, join owned workers and release the backend."""
@@ -725,23 +476,18 @@ class AppController:
         if model_token is not None:
             model_token.cancel()
 
-        self._process_manager.cancel_active_batch()
         self._process_manager.shutdown()
 
-        if ocr_thread is not None and ocr_thread.is_alive():
-            ocr_thread.join(timeout=15)
-        if hardware_thread is not None and hardware_thread.is_alive():
-            hardware_thread.join(timeout=15)
-            if hardware_thread.is_alive():
-                logger.warning("Hardware worker non terminato entro il timeout")
-        if model_thread is not None and model_thread.is_alive():
-            model_thread.join(timeout=15)
-            if model_thread.is_alive():
-                logger.warning("Model lifecycle worker non terminato entro il timeout")
+        for name, thread in (
+            ("OCR", ocr_thread),
+            ("Hardware", hardware_thread),
+            ("Model lifecycle", model_thread),
+        ):
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=_JOIN_TIMEOUT_S)
+                if thread.is_alive():
+                    logger.warning("%s worker non terminato entro il timeout", name)
 
         self._output_workflow.shutdown()
         self._engine.shutdown()
         self._initialized = False
-
-    def subscribe(self, event: str, handler: Callable) -> None:
-        EventBus.subscribe(event, handler)

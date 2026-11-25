@@ -6,7 +6,6 @@ import pytest
 
 from core.output_writer import (
     safe_source_stem,
-    split_combined_pdf_text,
     write_ocr_pages,
     write_ocr_text,
 )
@@ -49,21 +48,6 @@ def test_write_ocr_text_rejects_empty_content_and_unknown_format(tmp_path: Path)
 def test_writer_leaves_no_temporary_files_after_success(tmp_path: Path) -> None:
     write_ocr_text(tmp_path, "scan.png", "ok", "txt")
     assert [path.name for path in tmp_path.iterdir()] == ["scan.txt"]
-
-
-def test_split_combined_pdf_text_recovers_ordered_pages() -> None:
-    combined = "--- Pagina 1 ---\nuno\n\n--- Pagina 2 ---\ndue\nrighe"
-    assert split_combined_pdf_text(combined) == ["uno", "due\nrighe"]
-
-
-def test_split_combined_pdf_text_treats_unmarked_text_as_single_page() -> None:
-    assert split_combined_pdf_text("pagina unica") == ["pagina unica"]
-
-
-def test_split_combined_pdf_text_rejects_ambiguous_numbering() -> None:
-    combined = "--- Pagina 1 ---\nuno\n--- Pagina 3 ---\ntre"
-    with pytest.raises(ValueError, match="marcatori pagina"):
-        split_combined_pdf_text(combined)
 
 
 def test_write_ocr_pages_uses_numbered_collision_safe_names(tmp_path: Path) -> None:

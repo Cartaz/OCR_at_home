@@ -15,6 +15,10 @@ concurrency:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
@@ -22,7 +26,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install Qt runtime libraries
@@ -31,21 +35,29 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libegl1 \
             libgl1 \
+            libxkbcommon0 \
             libxkbcommon-x11-0 \
-            libxcb-cursor0
+            libxcb-cursor0 \
+            libfontconfig1 \
+            libdbus-1-3
 
-      - name: Install test dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install -r requirements.txt -r requirements-dev.txt pip-audit pyflakes
 
-      - name: Python syntax
-        run: python -m compileall -q main.py config core ui tests
+      - name: Known vulnerabilities in runtime dependencies
+        run: python -m pip_audit -r requirements.txt
+
+      - name: Python syntax and unused code
+        run: |
+          python -m compileall -q main.py config core ui tests benchmarks
+          python -m pyflakes main.py config core ui tests
 
       - name: Shell/package syntax
         run: |
           bash -n install.sh
           bash -n PKGBUILD
 
-      - name: Unit tests
+      - name: Tests
         run: python -m pytest -q

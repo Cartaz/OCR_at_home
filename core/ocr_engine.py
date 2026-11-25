@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Callable
 
-from config.constants import AppConstants, OCRDefaults
 from core.cancellation import CancellationToken
 from core.exceptions import (
     ModelLoadError,
@@ -15,89 +14,69 @@ from core.exceptions import (
     OperationBusyError,
     OperationCancelledError,
 )
+from core.llama_backend import LlamaServerBackend
 from core.models import OCRResult
 
 logger = logging.getLogger(__name__)
 
-BACKEND_LLAMA_CPP_SYCL = OCRDefaults.LLAMA_CPP_SYCL_DEVICE
-_SUPPORTED_BACKENDS = {BACKEND_LLAMA_CPP_SYCL}
-
 
 class OCREngine:
-    """Gestisce lifecycle e accesso esclusivo al backend SYCL."""
+    """Own lifecycle of and exclusive access to the SYCL backend.
 
-    def __init__(self) -> None:
-        self._initialized = False
-        self._device = AppConstants.LLAMA_CPP_SYCL_DEVICE
-        self._backend = BACKEND_LLAMA_CPP_SYCL
-        self._llama_backend: Any = None
-        self._lifecycle_lock = threading.RLock()
+    ``_lifecycle_lock`` only guards swapping the backend reference: it is never
+    held during model download or server startup, so state queries from the GUI
+    thread stay instantaneous while a load is running. ``_generation`` makes a
+    load that finishes after :meth:`shutdown` discard its own server instead of
+    installing it.
+    """
+
+    def __init__(
+        self,
+        backend_factory: Callable[[], LlamaServerBackend] = LlamaServerBackend,
+    ) -> None:
+        self._backend_factory = backend_factory
+        self._backend: LlamaServerBackend | None = None
+        self._generation = 0
+        self._lifecycle_lock = threading.Lock()
         self._inference_lock = threading.Lock()
 
     @property
     def is_initialized(self) -> bool:
         with self._lifecycle_lock:
-            return self._initialized
+            return self._backend is not None
 
-    @property
-    def device(self) -> str:
-        with self._lifecycle_lock:
-            return self._device
-
-    @property
-    def backend(self) -> str:
-        with self._lifecycle_lock:
-            return self._backend
-
-    def initialize(
-        self,
-        device: str = AppConstants.LLAMA_CPP_SYCL_DEVICE,
-        *,
-        cancel_token: CancellationToken | None = None,
-    ) -> None:
-        if device not in _SUPPORTED_BACKENDS:
-            raise ModelLoadError(
-                "llama-server",
-                f"Backend non supportato: {device}. GLM OCR è configurato SYCL-only.",
-            )
+    def initialize(self, *, cancel_token: CancellationToken | None = None) -> None:
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
-
         with self._lifecycle_lock:
+            previous = self._backend
+            self._backend = None
+            self._generation += 1
+            generation = self._generation
+        if previous is not None:
+            self._stop_backend(previous)
+
+        backend = self._backend_factory()
+        try:
+            backend.initialize(cancel_token=cancel_token)
             if cancel_token is not None:
                 cancel_token.raise_if_cancelled()
-            if self._llama_backend is not None:
-                self._shutdown_backend_locked()
+        except Exception as exc:
+            self._stop_backend(backend)
+            if isinstance(exc, (ModelLoadError, OperationCancelledError)):
+                raise
+            raise ModelLoadError(
+                "llama-server",
+                f"Impossibile inizializzare il backend SYCL: {exc}",
+            ) from exc
 
-            self._device = AppConstants.LLAMA_CPP_SYCL_DEVICE
-            self._backend = BACKEND_LLAMA_CPP_SYCL
-
-            backend: Any = None
-            try:
-                from core.llama_backend import LlamaServerBackend
-
-                backend = LlamaServerBackend(
-                    preferred_device=AppConstants.LLAMA_CPP_SYCL_DEVICE
-                )
-                backend.initialize(cancel_token=cancel_token)
-                if cancel_token is not None:
-                    cancel_token.raise_if_cancelled()
-                self._llama_backend = backend
-                self._initialized = True
-            except Exception as exc:
-                if backend is not None:
-                    try:
-                        backend.shutdown()
-                    except Exception:
-                        logger.exception("Errore cleanup backend dopo initialize fallita")
-                self._initialized = False
-                self._llama_backend = None
-                if isinstance(exc, (ModelLoadError, OperationCancelledError)):
-                    raise
-                raise ModelLoadError(
-                    "llama-server",
-                    f"Impossibile inizializzare il backend SYCL: {exc}",
-                ) from exc
+        with self._lifecycle_lock:
+            if generation == self._generation:
+                self._backend = backend
+                return
+        # shutdown() or another initialize() superseded this load meanwhile.
+        self._stop_backend(backend)
+        raise OperationCancelledError()
 
     def process_image(
         self,
@@ -113,11 +92,9 @@ class OCREngine:
             raise OperationBusyError("inference")
         try:
             with self._lifecycle_lock:
-                if not self._initialized or self._llama_backend is None:
-                    raise OCREngineNotInitializedError()
-                backend = self._llama_backend
-            if cancel_token is not None:
-                cancel_token.raise_if_cancelled()
+                backend = self._backend
+            if backend is None:
+                raise OCREngineNotInitializedError()
             return backend.process_image(
                 Path(image_path),
                 mode=mode,
@@ -127,18 +104,29 @@ class OCREngine:
         finally:
             self._inference_lock.release()
 
-    def shutdown(self) -> None:
-        with self._inference_lock:
-            with self._lifecycle_lock:
-                self._shutdown_backend_locked()
-                self._initialized = False
+    def shutdown(self, *, inference_timeout: float = 10.0) -> None:
+        """Release the backend.
 
-    def _shutdown_backend_locked(self) -> None:
-        backend = self._llama_backend
-        self._llama_backend = None
-        self._initialized = False
-        if backend is None:
-            return
+        Waits a bounded time for an in-flight inference to return; a stuck
+        inference does not keep the app alive: the server is stopped anyway,
+        which makes the stuck request fail.
+        """
+        acquired = self._inference_lock.acquire(timeout=max(0.0, inference_timeout))
+        if not acquired:
+            logger.warning("Inferenza ancora in corso allo shutdown: arresto forzato del backend")
+        try:
+            with self._lifecycle_lock:
+                backend = self._backend
+                self._backend = None
+                self._generation += 1
+            if backend is not None:
+                self._stop_backend(backend)
+        finally:
+            if acquired:
+                self._inference_lock.release()
+
+    @staticmethod
+    def _stop_backend(backend: LlamaServerBackend) -> None:
         try:
             backend.shutdown()
         except Exception as exc:

@@ -3,6 +3,11 @@
 On Linux a tiny exec shim installs ``PR_SET_PDEATHSIG`` before replacing itself
 with the requested executable. This preserves the child PID/process group while
 ensuring an app or benchmark killed with SIGKILL cannot orphan ``llama-server``.
+
+``PR_SET_PDEATHSIG`` is bound to the *thread* that forked the child, not to the
+process: a child spawned from a short-lived worker thread is killed as soon as
+that thread returns. Every spawn therefore runs on one dedicated thread that
+lives as long as the process.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
@@ -41,19 +47,26 @@ def owned_process_argv(
     ]
 
 
+# One idle worker thread that outlives every caller; ThreadPoolExecutor keeps
+# its worker alive until interpreter shutdown.
+_SPAWNER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="owned-process-spawner")
+
+
 def spawn_owned_process(
     command: Sequence[str],
     *,
     stdout: TextIO,
     env: Mapping[str, str],
 ) -> OwnedProcessHandle:
-    process = subprocess.Popen(
-        owned_process_argv(command),
+    argv = owned_process_argv(command)
+    process = _SPAWNER.submit(
+        subprocess.Popen,
+        argv,
         stdout=stdout,
         stderr=subprocess.STDOUT,
         env=dict(env),
         start_new_session=(os.name == "posix"),
-    )
+    ).result()
     process_group_id: int | None = None
     if os.name == "posix":
         try:

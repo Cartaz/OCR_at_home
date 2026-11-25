@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.1.0] — 2026-11-25
+
+### Interfaccia
+
+- Nuova interfaccia Qt Quick (QML) che replica al pixel la precedente UI HTML/CSS (stessi token, layout e breakpoint 900/620 px). Lo stato della vista vive in `ui/backend.py`, testabile senza scene graph. Rispetto a Qt WebEngine la memoria scende da ~360 a ~190 MiB PSS e da 5 processi a 1.
+- Ombre neumorfiche esterne e interne riprodotte con uno shader (`ui/qml/shaders/neumorphic.frag`) che applica la stessa matematica delle `box-shadow` CSS.
+- Unica differenza voluta: il pulsante di chiusura del messaggio resta in alto a destra (nel web finiva sotto i dettagli per un difetto della griglia CSS).
+- Rimossi il selettore "Lingua OCR" (mai usato dall'OCR) e la "confidenza" (llama.cpp non la fornisce).
+
+### Bug corretti
+
+- `llama-server` veniva ucciso alla fine del thread che l'aveva avviato (`PR_SET_PDEATHSIG` è legato al thread): ogni OCR pagava un riavvio completo del server e, sotto carico GPU, poteva portare a `DEVICE_LOST`. Ora tutti gli avvii passano da un thread dedicato a vita di processo.
+- Un `settings.json` malformato (es. `[]`) impediva l'avvio; valori di tipo errato venivano accettati. Ora la validazione è per campo, con fallback al default.
+- Il caricamento del modello teneva un lock interrogato dal thread GUI (possibile blocco dell'interfaccia con l'auto-unload attivo) e la chiusura durante il primo download attendeva la fine del download.
+- Il salvataggio per pagine dei PDF nel batch ri-analizzava il testo combinato: testo OCR contenente `--- Pagina N ---` poteva rompere la divisione. Le pagine ora viaggiano strutturate.
+- PDF cifrati o corrotti venivano segnalati come "senza pagine"; gli errori OCR comparivano come "Impossibile caricare il modello".
+- Le immagini incollate dagli appunti di una sessione andata in crash restavano in cache: ora vengono rimosse all'avvio successivo.
+
+### Sicurezza e installazione
+
+- Pillow portato a 13.x (42 advisory note sulla 12.3). `pip-audit` gira in CI.
+- Modelli GGUF scaricati da una revisione Hugging Face pinnata e verificati con SHA-256 (una sola volta per file).
+- Rilevamento SYCL solo tramite `llama-server --list-devices` (niente euristiche con falsi positivi); `ONEAPI_DEVICE_SELECTOR` dell'utente rispettato.
+- `install.sh` installa solo `PySide6-Essentials` e ripulisce i venv con WebEngine; `.cache/` (build di llama.cpp) è ignorata da git; `Exec=` del `.desktop` quotato.
+- `PKGBUILD` diventa un pacchetto da git con versione calcolata e include la UI QML.
+
+### Pulizia
+
+- Rimossi codice morto, API di compatibilità mai usate e la logica multi-device/fallback di un'app solo SYCL.
+- Il benchmark è spostato in `benchmarks/`; eliminati i runner superati (prompt, pipeline con override del contesto che non aveva effetto) e i test che controllavano stringhe nel sorgente.
+- CI su Python 3.12 e 3.14.
+
 ## [Unreleased] — 2026-08-25
 
 ### Architettura e affidabilità

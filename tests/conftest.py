@@ -1,15 +1,26 @@
-"""Fixture condivise per i test di GLM OCR.
+"""Shared fixtures for GLM OCR tests."""
 
-Provides:
-    event_bus: EventBus pulito per ogni test.
-"""
+from __future__ import annotations
+
+import os
+
 import pytest
-from core.event_bus import EventBus
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from core.event_bus import EventBus  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def event_bus():
-    """Resetta l'EventBus prima e dopo ogni test."""
+    """Reset the EventBus before and after every test."""
     EventBus.reset()
     yield EventBus
     EventBus.reset()
+
+
+@pytest.fixture
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])

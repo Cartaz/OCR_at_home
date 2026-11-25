@@ -38,3 +38,39 @@ def test_stage_png_rejects_empty_oversized_and_post_shutdown_payloads(tmp_path: 
     staging.shutdown()
     with pytest.raises(RuntimeError, match="arrestato"):
         staging.stage_png(b"png")
+
+
+def test_orphaned_sessions_are_purged_but_live_ones_are_kept(tmp_path: Path) -> None:
+    """Audit B6: clipboard images left by a crashed session are removed."""
+    root = tmp_path / "inputs"
+    live = InputStaging(root, max_bytes=1024)
+    live.stage_png(b"\x89PNG\r\n\x1a\n")
+    orphan = root / "session-crashed"
+    orphan.mkdir()
+    (orphan / "clipboard-old.png").write_bytes(b"\x89PNG")
+    old = __import__("time").time() - 2 * 24 * 3600
+    __import__("os").utime(orphan, (old, old))
+    recent_legacy = root / "session-legacy-running"
+    recent_legacy.mkdir()
+
+    fresh = InputStaging(root, max_bytes=1024)
+    assert fresh.purge_orphaned_sessions() == 1
+    assert not orphan.exists()
+    assert recent_legacy.exists()  # may belong to an older version still running
+    assert live.session_dir is not None and live.session_dir.exists()
+    live.shutdown()
+    fresh.shutdown()
+
+
+def test_session_is_published_only_after_it_is_locked(tmp_path: Path) -> None:
+    """Review fix: a concurrent purge must never see an unlocked new session."""
+    root = tmp_path / "inputs"
+    staging = InputStaging(root, max_bytes=1024)
+    staging.stage_png(b"\x89PNG\r\n\x1a\n")
+    assert staging.session_dir is not None
+    assert (staging.session_dir / ".owner.lock").exists()
+    assert list(root.glob(".creating-*")) == []
+    other = InputStaging(root, max_bytes=1024)
+    assert other.purge_orphaned_sessions() == 0
+    staging.shutdown()
+    other.shutdown()

@@ -10,7 +10,6 @@ from config.settings import Settings
 from core.app_controller import OP_IDLE, AppController
 from core.event_bus import EventBus
 from core.models import OCRResult
-from core.process_manager import ProcessManager
 
 
 def _wait_until(predicate, timeout: float = 3.0) -> bool:
@@ -35,7 +34,7 @@ class CooperativeEngine:
         assert cancel_token is not None
         cancel_token.wait(timeout=3)
         cancel_token.raise_if_cancelled()
-        return OCRResult(text="unexpected completion", confidence=None)
+        return OCRResult(text="unexpected completion")
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -44,14 +43,8 @@ class CooperativeEngine:
 
 def _controller(monkeypatch) -> tuple[AppController, CooperativeEngine]:
     monkeypatch.setattr(Settings, "save", lambda self: None)
-    controller = AppController(Settings())
     engine = CooperativeEngine()
-    controller._engine = engine  # type: ignore[attr-defined]
-    controller._process_manager.shutdown()  # type: ignore[attr-defined]
-    controller._process_manager = ProcessManager(  # type: ignore[attr-defined]
-        engine,  # type: ignore[arg-type]
-        on_job_finished=controller._on_batch_finished,  # type: ignore[attr-defined]
-    )
+    controller = AppController(Settings(), engine=engine)  # type: ignore[arg-type]
     return controller, engine
 
 
@@ -75,12 +68,12 @@ def test_batch_cancellation_reaches_active_task_and_releases_operation(monkeypat
     events: list[str] = []
     EventBus.subscribe("batch_cancelled", lambda _payload: events.append("cancelled"))
 
-    job = controller.run_batch([Path("a.png"), Path("b.png")])
+    controller.run_batch([Path("a.png"), Path("b.png")])
     assert engine.started.wait(timeout=1)
 
-    controller.cancel_batch(job.job_id)
+    controller.cancel_active_batch()
 
     assert _wait_until(lambda: controller.operation == OP_IDLE)
-    assert _wait_until(lambda: controller.process_manager.active_job_id is None)
+    assert _wait_until(lambda: controller.active_batch_id is None)
     assert events == ["cancelled"]
     controller.shutdown()

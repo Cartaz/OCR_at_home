@@ -16,9 +16,8 @@ from core.app_controller import (
     AppController,
 )
 from core.event_bus import EventBus
-from core.exceptions import OperationBusyError, OperationCancelledError
-from core.models import HardwareInfo, OCRResult
-from core.process_manager import ProcessManager
+from core.exceptions import OperationBusyError
+from core.models import BackendStatus, OCRResult
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
@@ -33,8 +32,6 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 class FakeEngine:
     def __init__(self, *, initialized: bool = True) -> None:
         self.is_initialized = initialized
-        self.device = "llama-cpp" if initialized else ""
-        self.backend = "llama-cpp" if initialized else ""
         self.started = threading.Event()
         self.release = threading.Event()
         self.release.set()
@@ -42,52 +39,36 @@ class FakeEngine:
         self.initialize_release = threading.Event()
         self.initialize_release.set()
         self.shutdown_calls = 0
-        self.initialize_calls: list[str] = []
+        self.initialize_calls = 0
 
     def process_image(self, _path: Path, **_kwargs: object) -> OCRResult:
         self.started.set()
         self.release.wait(timeout=3)
-        return OCRResult(text="ok", confidence=0.9)
+        return OCRResult(text="ok")
 
-    def initialize(self, device: str, *, cancel_token=None) -> None:
-        self.initialize_calls.append(device)
+    def initialize(self, *, cancel_token=None) -> None:
+        self.initialize_calls += 1
         self.initialize_started.set()
         while not self.initialize_release.wait(timeout=0.01):
             if cancel_token is not None:
                 cancel_token.raise_if_cancelled()
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
-        self.device = device
-        self.backend = device
         self.is_initialized = True
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
         self.is_initialized = False
-        self.device = ""
-        self.backend = ""
 
 
 class FakeDetector:
-    def __init__(self) -> None:
-        self.devices = [
-            HardwareInfo(
-                device_name="llama.cpp CPU",
-                device_type="llama-cpp",
-                available=True,
-            ),
-            HardwareInfo(
-                device_name="llama.cpp SYCL",
-                device_type="llama-cpp-sycl",
-                available=True,
-            ),
-        ]
+    def __init__(self, available: bool = True) -> None:
+        self.status = BackendStatus(available, "llama.cpp + SYCL0: test")
+        self.refresh_values: list[bool] = []
 
-    def detect(self, *, refresh: bool = False):
-        return list(self.devices)
-
-    def get_default(self):
-        return self.devices[0]
+    def detect(self, *, refresh: bool = False) -> BackendStatus:
+        self.refresh_values.append(refresh)
+        return self.status
 
 
 class BlockingDetector(FakeDetector):
@@ -95,30 +76,12 @@ class BlockingDetector(FakeDetector):
         super().__init__()
         self.started = threading.Event()
         self.release = threading.Event()
-        self.refresh_values: list[bool] = []
 
-    def detect(self, *, refresh: bool = False):
+    def detect(self, *, refresh: bool = False) -> BackendStatus:
         self.refresh_values.append(refresh)
         self.started.set()
         assert self.release.wait(timeout=2), "test detector was never released"
-        return list(self.devices)
-
-
-class FakeUnavailableDetector:
-    def __init__(self) -> None:
-        self.devices = [
-            HardwareInfo(
-                device_name="llama.cpp non disponibile",
-                device_type="llama-cpp",
-                available=False,
-            )
-        ]
-
-    def detect(self, *, refresh: bool = False):
-        return list(self.devices)
-
-    def get_default(self):
-        return self.devices[0]
+        return self.status
 
 
 def _controller_with_fake_engine(
@@ -128,15 +91,9 @@ def _controller_with_fake_engine(
     settings: Settings | None = None,
 ) -> tuple[AppController, FakeEngine]:
     monkeypatch.setattr(Settings, "save", lambda self: None)
-    controller = AppController(settings or Settings(default_device="llama-cpp"))
     fake = FakeEngine(initialized=initialized)
-    controller._engine = fake  # type: ignore[attr-defined]
+    controller = AppController(settings or Settings(), engine=fake)  # type: ignore[arg-type]
     controller._hardware_detector = FakeDetector()  # type: ignore[attr-defined]
-    controller._process_manager.shutdown()  # type: ignore[attr-defined]
-    controller._process_manager = ProcessManager(  # type: ignore[attr-defined]
-        fake,  # type: ignore[arg-type]
-        on_job_finished=controller._on_batch_finished,  # type: ignore[attr-defined]
-    )
     return controller, fake
 
 
@@ -156,31 +113,18 @@ def test_ocr_and_batch_are_mutually_exclusive(monkeypatch) -> None:
     controller.shutdown()
 
 
-def test_switch_device_runs_model_load_on_controller_worker(monkeypatch) -> None:
-    controller, engine = _controller_with_fake_engine(monkeypatch)
-
-    controller.switch_device("llama-cpp-sycl")
-
-    assert engine.initialize_started.wait(timeout=1)
-    assert _wait_until(lambda: controller.operation == OP_IDLE)
-    assert engine.initialize_calls == ["llama-cpp-sycl"]
-    assert engine.shutdown_calls == 0
-    assert controller.model_device == "llama-cpp-sycl"
-    controller.shutdown()
-
-
 def test_cancelled_async_model_load_releases_operation(monkeypatch) -> None:
     controller, engine = _controller_with_fake_engine(monkeypatch, initialized=False)
     engine.initialize_release.clear()
 
-    controller.request_model_load("llama-cpp-sycl")
+    controller.request_model_load()
     assert controller.operation == OP_MODEL_LOADING
     assert engine.initialize_started.wait(timeout=1)
 
     controller.cancel_model_loading()
 
     assert _wait_until(lambda: controller.operation == OP_IDLE)
-    assert engine.initialize_calls == ["llama-cpp-sycl"]
+    assert engine.initialize_calls == 1
     assert engine.is_initialized is False
     controller.shutdown()
 
@@ -188,7 +132,7 @@ def test_cancelled_async_model_load_releases_operation(monkeypatch) -> None:
 def test_request_initialize_returns_while_hardware_probe_is_running(monkeypatch) -> None:
     monkeypatch.setattr(Settings, "save", lambda self: None)
     controller = AppController(
-        Settings(default_device="llama-cpp", load_model_at_startup=False)
+        Settings(load_model_at_startup=False)
     )
     detector = BlockingDetector()
     controller._hardware_detector = detector  # type: ignore[attr-defined]
@@ -223,58 +167,39 @@ def test_request_hardware_refresh_returns_while_probe_is_running(monkeypatch) ->
     controller.shutdown()
 
 
-def test_initialize_preserves_configured_device_if_nothing_is_available(monkeypatch) -> None:
-    saved: list[str] = []
-    monkeypatch.setattr(
-        Settings,
-        "save",
-        lambda self: saved.append(self.default_device),
-    )
-    controller = AppController(
-        Settings(default_device="llama-cpp-sycl", load_model_at_startup=False)
-    )
-    controller._hardware_detector = FakeUnavailableDetector()  # type: ignore[attr-defined]
-
-    controller.initialize()
-
-    assert controller.settings.default_device == "llama-cpp-sycl"
-    assert controller.operation == OP_IDLE
-    assert saved == []
-    controller.shutdown()
-
-
 def test_initialize_can_leave_model_unloaded(monkeypatch) -> None:
     monkeypatch.setattr(Settings, "save", lambda self: None)
     controller = AppController(
-        Settings(default_device="llama-cpp-sycl", load_model_at_startup=False)
+        Settings(load_model_at_startup=False), engine=FakeEngine(initialized=False)  # type: ignore[arg-type]
     )
     controller._hardware_detector = FakeDetector()  # type: ignore[attr-defined]
+    unloaded: list[dict] = []
+    EventBus.subscribe("model_unloaded", unloaded.append)
 
     controller.initialize()
 
     assert controller.operation == OP_IDLE
     assert controller.model_ready is False
+    assert unloaded == [{"reason": "startup_disabled"}]
     controller.shutdown()
 
 
 def test_initialize_remains_retryable_if_model_worker_cannot_start(monkeypatch) -> None:
     monkeypatch.setattr(Settings, "save", lambda self: None)
-    controller = AppController(
-        Settings(default_device="llama-cpp-sycl", load_model_at_startup=True)
-    )
     engine = FakeEngine(initialized=False)
-    controller._engine = engine  # type: ignore[attr-defined]
+    controller = AppController(Settings(load_model_at_startup=True), engine=engine)  # type: ignore[arg-type]
     controller._hardware_detector = FakeDetector()  # type: ignore[attr-defined]
     attempts = 0
+    real_start = controller._start_model_worker
 
-    def start_model_load(device: str) -> None:
+    def start_model_worker(name, target) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise RuntimeError("simulated thread start failure")
-        controller.load_model_sync(device)
+        real_start(name, target)
 
-    monkeypatch.setattr(controller, "_start_model_load_worker", start_model_load)
+    monkeypatch.setattr(controller, "_start_model_worker", start_model_worker)
 
     with pytest.raises(RuntimeError, match="thread start failure"):
         controller.initialize()
@@ -285,7 +210,7 @@ def test_initialize_remains_retryable_if_model_worker_cannot_start(monkeypatch) 
     controller.initialize()
 
     assert controller._initialized is True  # type: ignore[attr-defined]
-    assert controller.operation == OP_IDLE
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is True
     assert attempts == 2
     controller.shutdown()
@@ -299,11 +224,11 @@ def test_model_can_be_unloaded_and_loaded_again_without_closing_controller(monke
     assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is False
 
-    controller.request_model_load("llama-cpp-sycl")
+    controller.request_model_load()
     assert engine.initialize_started.wait(timeout=1)
     assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is True
-    assert engine.initialize_calls == ["llama-cpp-sycl"]
+    assert engine.initialize_calls == 1
     controller.shutdown()
 
 
@@ -323,7 +248,7 @@ def test_model_lifecycle_releases_worker_before_publishing_idle(monkeypatch) -> 
     assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is False
 
-    controller.request_model_load("llama-cpp-sycl")
+    controller.request_model_load()
     assert engine.initialize_started.wait(timeout=1)
     assert _wait_until(lambda: controller.operation == OP_IDLE)
     assert engine.is_initialized is True
@@ -350,10 +275,7 @@ def test_single_ocr_is_resumed_after_controller_owned_model_load(monkeypatch) ->
 
 
 def test_idle_auto_unload_policy_lives_in_controller(monkeypatch) -> None:
-    settings = Settings(
-        default_device="llama-cpp",
-        model_auto_unload_minutes=5,
-    )
+    settings = Settings(model_auto_unload_minutes=5)
     controller, engine = _controller_with_fake_engine(
         monkeypatch,
         settings=settings,
@@ -373,7 +295,7 @@ def test_shutdown_cancels_and_joins_model_load_worker(monkeypatch) -> None:
     controller, engine = _controller_with_fake_engine(monkeypatch, initialized=False)
     engine.initialize_release.clear()
 
-    controller.request_model_load("llama-cpp-sycl")
+    controller.request_model_load()
     assert engine.initialize_started.wait(timeout=1)
 
     controller.shutdown()
@@ -381,3 +303,52 @@ def test_shutdown_cancels_and_joins_model_load_worker(monkeypatch) -> None:
     assert controller.operation != OP_MODEL_LOADING
     model_thread = controller._model_thread  # type: ignore[attr-defined]
     assert model_thread is None or not model_thread.is_alive()
+
+
+def test_idle_check_does_not_touch_the_engine_while_busy(monkeypatch) -> None:
+    """Regression (audit M1): the GUI-thread timer must not query the engine
+    while a model load is running."""
+    controller, engine = _controller_with_fake_engine(
+        monkeypatch, initialized=False, settings=Settings(model_auto_unload_minutes=5)
+    )
+    engine.initialize_release.clear()
+    controller.request_model_load()
+    assert engine.initialize_started.wait(timeout=1)
+
+    class Exploding:
+        @property
+        def is_initialized(self):  # pragma: no cover - must not be reached
+            raise AssertionError("engine queried during model load")
+
+    real_engine = controller._engine  # type: ignore[attr-defined]
+    controller._engine = Exploding()  # type: ignore[attr-defined]
+    assert controller.check_idle_model_unload(now=10_000.0) is False
+    controller._engine = real_engine  # type: ignore[attr-defined]
+    engine.initialize_release.set()
+    assert _wait_until(lambda: controller.operation == OP_IDLE)
+    controller.shutdown()
+
+
+def test_ocr_completed_event_carries_text_and_pages(monkeypatch) -> None:
+    controller, engine = _controller_with_fake_engine(monkeypatch)
+    engine.process_image = lambda _path, **_kw: OCRResult(text="a\n\nb", pages=("a", "b"), processing_time_ms=5)  # type: ignore[method-assign]
+    completed: list[dict] = []
+    EventBus.subscribe("ocr_completed", completed.append)
+    controller.start_ocr(Path("doc.pdf"))
+    assert _wait_until(lambda: bool(completed))
+    assert completed[0]["pages"] == ["a", "b"]
+    assert completed[0]["text"] == "a\n\nb"
+    assert completed[0]["is_pdf"] is True
+    controller.shutdown()
+
+
+def test_invalid_settings_update_is_rejected_without_persisting(monkeypatch) -> None:
+    controller, _engine = _controller_with_fake_engine(monkeypatch)
+    saved: list[Settings] = []
+    monkeypatch.setattr(Settings, "save", lambda self: saved.append(self))
+    with pytest.raises(ValueError):
+        controller.update_settings(model_auto_unload_minutes=-1)
+    assert saved == []
+    controller.update_settings(batch_auto_save=True)
+    assert controller.settings.batch_auto_save is True and len(saved) == 1
+    controller.shutdown()

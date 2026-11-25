@@ -2,18 +2,35 @@
 
 from __future__ import annotations
 
+import fcntl
+import logging
+import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_SESSION_PREFIX = "session-"
+_LOCK_NAME = ".owner.lock"
+_LEGACY_STALE_S = 24 * 3600
 
 
 class InputStaging:
-    """Own temporary OCR input files for one application session."""
+    """Own temporary OCR input files (clipboard images) for one session.
+
+    Each session directory holds an ``flock`` for the life of the process.
+    Directories left behind by a crashed session are therefore recognisable
+    (their lock can be taken) and are purged, while directories of another
+    running instance are left alone.
+    """
 
     def __init__(self, root: Path, *, max_bytes: int) -> None:
         self._root = Path(root)
         self._max_bytes = int(max_bytes)
         self._session_dir: Path | None = None
+        self._lock_fd: int | None = None
         self._shutdown = False
 
     @property
@@ -49,12 +66,74 @@ class InputStaging:
             path.unlink(missing_ok=True)
             raise
 
+    def purge_orphaned_sessions(self) -> int:
+        """Remove session directories whose owning process no longer exists."""
+        if not self._root.is_dir():
+            return 0
+        removed = 0
+        for candidate in self._root.glob(f"{_SESSION_PREFIX}*"):
+            if not candidate.is_dir() or candidate == self._session_dir:
+                continue
+            lock_path = candidate / _LOCK_NAME
+            try:
+                # Never create the lock: every live session publishes its
+                # directory only after locking it (see _ensure_session_dir).
+                fd = os.open(lock_path, os.O_RDWR)
+            except FileNotFoundError:
+                # Created by a version without locks, possibly still running:
+                # only remove it once it is clearly stale.
+                try:
+                    stale = candidate.stat().st_mtime < time.time() - _LEGACY_STALE_S
+                except OSError:
+                    stale = False
+                if stale:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    removed += 1
+                continue
+            except OSError:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue  # owned by a running instance
+            try:
+                shutil.rmtree(candidate, ignore_errors=True)
+                removed += 1
+            finally:
+                os.close(fd)
+        # A crash between mkdtemp() and rename() leaves a private staging dir.
+        stale_before = time.time() - 3600
+        for candidate in self._root.glob(".creating-*"):
+            try:
+                if candidate.stat().st_mtime < stale_before:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+        if removed:
+            logger.info("Rimosse %d sessioni di input orfane", removed)
+        return removed
+
     def _ensure_session_dir(self) -> Path:
         if self._session_dir is None:
             self._root.mkdir(parents=True, exist_ok=True)
-            self._session_dir = Path(
-                tempfile.mkdtemp(prefix="session-", dir=self._root)
-            )
+            # Lock under a private name, then publish atomically: a concurrent
+            # purge only ever sees session directories that are already locked.
+            staging = Path(tempfile.mkdtemp(prefix=".creating-", dir=self._root))
+            fd = -1
+            try:
+                fd = os.open(staging / _LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                session_dir = self._root / (_SESSION_PREFIX + staging.name.removeprefix(".creating-"))
+                staging.rename(session_dir)
+            except Exception:
+                if fd >= 0:
+                    os.close(fd)
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            self._lock_fd = fd
+            self._session_dir = session_dir
         return self._session_dir
 
     def shutdown(self) -> None:
@@ -66,3 +145,6 @@ class InputStaging:
         self._session_dir = None
         if session_dir is not None:
             shutil.rmtree(session_dir, ignore_errors=True)
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)
+            self._lock_fd = None

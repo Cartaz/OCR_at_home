@@ -30,9 +30,8 @@ Handler = Callable[[dict[str, Any]], None]
 class EventBus:
     """Event bus singleton thread-safe per la comunicazione tra moduli.
 
-    Pattern ispirato ad AllTranscribr. Utilizza un lock per garantire
-    la thread-safety delle operazioni di subscribe/unsubscribe/emit.
-    Gli handler sono memorizzati in un defaultdict(list) per evento.
+    Utilizza un lock per garantire la thread-safety delle operazioni di
+    subscribe/unsubscribe/emit.
 
     L'uso consigliato è tramite i metodi di classe:
         EventBus.subscribe("event", handler)
@@ -73,11 +72,8 @@ class EventBus:
         for handler in handlers:
             try:
                 handler(event_data)
-            except Exception as exc:
-                logger.error(
-                    "Errore nell'handler per evento '%s': %s",
-                    event_name, exc,
-                )
+            except Exception:
+                logger.exception("Errore nell'handler per evento '%s'", event_name)
 
     # --- API pubblica (metodi di classe che delegano al singleton) ---
 

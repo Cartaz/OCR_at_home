@@ -14,7 +14,6 @@ from typing import Sequence
 
 SUPPORTED_TEXT_FORMATS = {"txt", "md"}
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_PDF_PAGE_MARKER = re.compile(r"(?m)^--- Pagina (\d+) ---\n")
 
 
 def safe_source_stem(source_path: str | Path) -> str:
@@ -30,33 +29,7 @@ def safe_source_stem(source_path: str | Path) -> str:
     return stem or "ocr-result"
 
 
-def split_combined_pdf_text(combined_text: str) -> list[str]:
-    """Recover page texts from the deterministic combined PDF representation.
-
-    Multi-page OCR output is produced internally as ``--- Pagina N ---`` blocks.
-    Marker numbering is validated before splitting; malformed or ambiguous data is
-    rejected rather than silently producing incorrectly numbered page files.
-    A single-page PDF has no marker and is therefore represented by one element.
-    """
-    text = str(combined_text)
-    matches = list(_PDF_PAGE_MARKER.finditer(text))
-    if not matches:
-        return [text]
-
-    numbers = [int(match.group(1)) for match in matches]
-    expected = list(range(1, len(matches) + 1))
-    if numbers != expected:
-        raise ValueError("Output PDF combinato con marcatori pagina non validi")
-
-    pages: list[str] = []
-    for index, match in enumerate(matches):
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        pages.append(text[start:end].strip("\n"))
-    return pages
-
-
-def _normalize_format(file_format: str) -> str:
+def normalize_format(file_format: str) -> str:
     fmt = str(file_format).strip().lower().lstrip(".")
     if fmt not in SUPPORTED_TEXT_FORMATS:
         raise ValueError(f"Formato output non supportato: {file_format}")
@@ -141,7 +114,7 @@ def write_ocr_text(
     file_format: str,
 ) -> Path:
     """Atomically publish OCR text without ever overwriting an existing file."""
-    fmt = _normalize_format(file_format)
+    fmt = normalize_format(file_format)
     directory = _prepare_output_directory(output_dir)
     return _write_atomic_unique(
         directory,
@@ -166,7 +139,7 @@ def write_ocr_pages(
     if isinstance(page_texts, (str, bytes)) or not page_texts:
         raise ValueError("Nessuna pagina PDF da salvare")
 
-    fmt = _normalize_format(file_format)
+    fmt = normalize_format(file_format)
     directory = _prepare_output_directory(output_dir)
     base_stem = safe_source_stem(source_path)
     width = max(3, len(str(len(page_texts))))

@@ -75,3 +75,43 @@ with open(os.devnull, "w", encoding="utf-8") as log:
             owner.wait(timeout=3)
         if child_pid is not None and _process_is_running(child_pid):
             os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not sys.platform.startswith("linux"),
+    reason="PR_SET_PDEATHSIG is Linux-specific",
+)
+def test_owned_child_survives_the_exit_of_the_spawning_thread() -> None:
+    """PR_SET_PDEATHSIG fires when the *thread* that forked the child exits.
+
+    llama-server is started from short-lived worker threads (model load, OCR
+    restart); it must live until the owning process exits, not until the
+    worker thread returns.
+    """
+    import threading
+
+    from core.owned_process import spawn_owned_process
+
+    handles = []
+
+    def spawn_then_finish() -> None:
+        handles.append(
+            spawn_owned_process(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.DEVNULL,  # type: ignore[arg-type]
+                env=dict(os.environ),
+            )
+        )
+        # Like the model-load worker, outlive the child's prctl() call.
+        time.sleep(1.0)
+
+    thread = threading.Thread(target=spawn_then_finish)
+    thread.start()
+    thread.join()
+    process = handles[0].process
+    try:
+        time.sleep(0.8)
+        assert process.poll() is None, "owned child was killed when its spawning thread exited"
+    finally:
+        process.kill()
+        process.wait(timeout=5)

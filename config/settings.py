@@ -1,4 +1,3 @@
-# config/settings.py
 """Impostazioni persistenti di GLM OCR."""
 
 from __future__ import annotations
@@ -7,38 +6,60 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import asdict, dataclass
-from enum import Enum
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+from typing import Any
 
-from config.constants import AppMeta, OCRDefaults, UIConstraints
+from config.constants import AppMeta, UIConstraints
 
 logger = logging.getLogger(__name__)
 
+_BOOL_FIELDS = frozenset(
+    {
+        "preprocessing_enabled",
+        "batch_auto_save",
+        "batch_save_pdf_pages",
+        "load_model_at_startup",
+    }
+)
+_INT_RANGES = {
+    "model_auto_unload_minutes": (0, 1440),
+    "window_width": (UIConstraints.WINDOW_MIN_WIDTH, 16384),
+    "window_height": (UIConstraints.WINDOW_MIN_HEIGHT, 16384),
+}
+OUTPUT_FORMATS = frozenset({"txt", "md"})
 
-class ComputeDevice(str, Enum):
-    """Backend di calcolo.
 
-    GLM OCR è intenzionalmente SYCL-only. ``LLAMA_CPP`` resta soltanto come
-    token legacy per riconoscere vecchi file di configurazione.
-    """
-
-    LLAMA_CPP = "llama-cpp"
-    LLAMA_CPP_SYCL = "llama-cpp-sycl"
-
-    @classmethod
-    def choices(cls) -> list[str]:
-        return [cls.LLAMA_CPP_SYCL.value]
-
-    @classmethod
-    def default(cls) -> ComputeDevice:
-        return cls.LLAMA_CPP_SYCL
+def validate_setting(name: str, value: Any) -> Any:
+    """Return the normalized value for one setting or raise ``ValueError``."""
+    if name in _BOOL_FIELDS:
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} deve essere un booleano")
+        return value
+    if name in _INT_RANGES:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} deve essere un intero")
+        low, high = _INT_RANGES[name]
+        if not low <= value <= high:
+            raise ValueError(f"{name} deve essere compreso tra {low} e {high}")
+        return value
+    if name == "batch_output_format":
+        fmt = str(value).strip().lower().lstrip(".") if isinstance(value, str) else ""
+        if fmt not in OUTPUT_FORMATS:
+            raise ValueError("Formato batch supportato: txt oppure md")
+        return fmt
+    if name == "output_dir":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("La directory output non può essere vuota")
+        path = Path(value.strip()).expanduser()
+        if not path.is_absolute():
+            raise ValueError("La directory output deve essere un percorso assoluto")
+        return str(path)
+    raise AttributeError(f"Settings non ha il campo '{name}'")
 
 
 @dataclass(frozen=True)
 class Settings:
-    default_device: str = ComputeDevice.LLAMA_CPP_SYCL.value
-    language: str = OCRDefaults.DEFAULT_OCR_LANGUAGE
     output_dir: str = str(Path.home() / "Documents" / "glm-ocr-output")
     preprocessing_enabled: bool = True
     batch_auto_save: bool = False
@@ -46,16 +67,14 @@ class Settings:
     batch_save_pdf_pages: bool = False
     load_model_at_startup: bool = True
     model_auto_unload_minutes: int = 0
-    model_path: str = str(AppMeta.GGUF_MODEL_DIR)
     window_width: int = UIConstraints.WINDOW_WIDTH
     window_height: int = UIConstraints.WINDOW_HEIGHT
 
     def with_(self, **overrides: object) -> Settings:
+        """Return a copy with validated overrides; invalid values raise ``ValueError``."""
         current = asdict(self)
         for key, value in overrides.items():
-            if key not in current:
-                raise AttributeError(f"Settings non ha il campo '{key}'")
-            current[key] = value
+            current[key] = validate_setting(key, value)
         return Settings(**current)
 
     def save(self) -> None:
@@ -98,61 +117,36 @@ class Settings:
 
     @classmethod
     def load(cls) -> Settings:
-        """Carica le impostazioni e forza qualsiasi device legacy su SYCL.
+        """Load settings, replacing every malformed value with its default.
 
-        Le chiavi non più supportate (per esempio la vecchia
-        ``confidence_threshold``) vengono ignorate in modo compatibile.
+        Startup must never fail because of the settings file: a non-object
+        JSON document, an unreadable file or a single invalid value only
+        reverts the affected part to defaults. Keys from older versions
+        (``default_device``, ``language``, ``model_path``,
+        ``confidence_threshold``) are ignored.
         """
-        if not AppMeta.SETTINGS_PATH.exists():
+        path = AppMeta.SETTINGS_PATH
+        if not path.exists():
             logger.info("Nessun file impostazioni trovato, uso i default")
             return cls()
 
         try:
-            with open(AppMeta.SETTINGS_PATH, "r", encoding="utf-8") as file:
-                data = json.load(file)
-
-            valid_keys = {field.name for field in cls.__dataclass_fields__.values()}
-            filtered = {key: value for key, value in data.items() if key in valid_keys}
-
-            configured = filtered.get("default_device")
-            if configured != ComputeDevice.LLAMA_CPP_SYCL.value:
-                filtered["default_device"] = ComputeDevice.LLAMA_CPP_SYCL.value
-                logger.info(
-                    "Migrazione dispositivo SYCL-only: %s → %s",
-                    configured,
-                    ComputeDevice.LLAMA_CPP_SYCL.value,
-                )
-
-            output_format = str(filtered.get("batch_output_format", "txt")).lower()
-            filtered["batch_output_format"] = (
-                output_format if output_format in {"txt", "md"} else "txt"
-            )
-            for key in (
-                "batch_auto_save",
-                "batch_save_pdf_pages",
-                "load_model_at_startup",
-            ):
-                if key in filtered and not isinstance(filtered[key], bool):
-                    filtered.pop(key)
-
-            try:
-                auto_unload = int(filtered.get("model_auto_unload_minutes", 0))
-            except (TypeError, ValueError):
-                auto_unload = 0
-            filtered["model_auto_unload_minutes"] = (
-                auto_unload if 0 <= auto_unload <= 1440 else 0
-            )
-
-            settings = cls(**filtered)
-            logger.info(
-                "Impostazioni caricate — device=%s, lang=%s",
-                settings.default_device,
-                settings.language,
-            )
-            return settings
-        except (json.JSONDecodeError, TypeError, KeyError, OSError) as exc:
-            logger.warning(
-                "Impossibile caricare le impostazioni (%s), uso i default",
-                exc,
-            )
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning("Impossibile leggere le impostazioni (%s), uso i default", exc)
             return cls()
+        if not isinstance(data, dict):
+            logger.warning("File impostazioni non valido (atteso un oggetto JSON), uso i default")
+            return cls()
+
+        values: dict[str, Any] = {}
+        for field in fields(cls):
+            if field.name not in data:
+                continue
+            try:
+                values[field.name] = validate_setting(field.name, data[field.name])
+            except ValueError as exc:
+                logger.warning("Impostazione %s non valida (%s), uso il default", field.name, exc)
+        settings = cls(**values)
+        logger.info("Impostazioni caricate da %s", path)
+        return settings

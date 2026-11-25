@@ -1,2 +1,4 @@
 # Development/test dependencies only.
 pytest>=8.3,<9
+# Provides the `qsb` shader compiler used to rebuild/verify ui/qml/shaders/*.qsb.
+PySide6-Addons>=6.9.0,<7

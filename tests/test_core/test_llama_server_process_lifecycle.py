@@ -17,7 +17,7 @@ import pytest
 from core.cancellation import CancellationToken
 from core.exceptions import OperationCancelledError
 from core.llama_backend import LlamaServerBackend
-from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS
+from core.llama_ocr_api import LlamaServerConnectionError
 
 pytestmark = pytest.mark.skipif(
     os.name != "posix",
@@ -132,11 +132,9 @@ def _prepare_runtime(
         "core.llama_backend.ensure_gguf_models",
         lambda **_kwargs: {"main": main_model, "mmproj": mmproj_model},
     )
-    monkeypatch.setattr(
-        "core.llama_backend.detect_gpu_backend",
-        lambda _device: (GPU_OFFLOAD_ALL_LAYERS, "sycl"),
-    )
-    monkeypatch.setattr("core.llama_backend.venv_lib_env", lambda: dict(env))
+    monkeypatch.setattr("core.llama_backend.list_sycl_devices", lambda _path: ["SYCL0: fake"])
+    monkeypatch.setattr("core.llama_backend.sycl_runtime_env", lambda: dict(env))
+    monkeypatch.setattr(LlamaServerBackend, "_log_path", lambda self: tmp_path / "llama-server.log")
     return pid_file, child_pid_file
 
 
@@ -226,8 +224,8 @@ def test_server_crash_during_image_ocr_restarts_and_retries_once(
             assert process is not None
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=3)
-            raise ConnectionResetError("connection reset by peer")
-        return "retry-ok", None
+            raise LlamaServerConnectionError("connection reset by peer")
+        return "retry-ok"
 
     monkeypatch.setattr("core.llama_backend.ocr_single_image", flaky_ocr)
     image = tmp_path / "page.png"
@@ -265,3 +263,28 @@ def test_shutdown_is_idempotent_after_server_has_already_crashed(
     assert backend.is_initialized is False
     assert backend.server_url == ""
     assert backend._process is None  # type: ignore[attr-defined]
+
+
+def test_failed_restart_during_ocr_reaps_the_new_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review fix: a server start cancelled while waiting for readiness (as in
+    a restart during OCR) must not leave a process, log handle or URL behind."""
+    import core.llama_backend as llama_backend
+
+    pid_file, _child = _prepare_runtime(monkeypatch, tmp_path, spawn_child=False, health_delay=30.0)
+    backend = LlamaServerBackend()
+    backend._server_path = llama_backend.find_llama_server()  # type: ignore[attr-defined]
+    backend._model_paths = llama_backend.ensure_gguf_models()  # type: ignore[attr-defined]
+    token = CancellationToken()
+    threading.Timer(1.0, token.cancel).start()
+
+    with pytest.raises(OperationCancelledError):
+        backend._start_server(cancel_token=token)  # type: ignore[attr-defined]
+
+    assert backend._process is None  # type: ignore[attr-defined]
+    assert backend._log_file is None  # type: ignore[attr-defined]
+    assert backend.server_url == ""
+    server_pid = int(pid_file.read_text(encoding="utf-8"))
+    assert _wait_until(lambda: not _pid_exists(server_pid))

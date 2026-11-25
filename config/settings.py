@@ -28,6 +28,8 @@ _INT_RANGES = {
     "window_height": (UIConstraints.WINDOW_MIN_HEIGHT, 16384),
 }
 OUTPUT_FORMATS = frozenset({"txt", "md"})
+# 0 = let llama.cpp choose (its stock default is the model's training context).
+LLAMA_CONTEXT_RANGE = (512, 1_048_576)
 
 
 def validate_setting(name: str, value: Any) -> Any:
@@ -42,6 +44,15 @@ def validate_setting(name: str, value: Any) -> Any:
         low, high = _INT_RANGES[name]
         if not low <= value <= high:
             raise ValueError(f"{name} deve essere compreso tra {low} e {high}")
+        return value
+    if name == "llama_context_size":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Il contesto di llama-server deve essere un intero")
+        low, high = LLAMA_CONTEXT_RANGE
+        if value != 0 and not low <= value <= high:
+            raise ValueError(
+                f"Il contesto di llama-server deve essere 0 (default) o tra {low} e {high} token"
+            )
         return value
     if name == "batch_output_format":
         fmt = str(value).strip().lower().lstrip(".") if isinstance(value, str) else ""
@@ -67,6 +78,7 @@ class Settings:
     batch_save_pdf_pages: bool = False
     load_model_at_startup: bool = True
     model_auto_unload_minutes: int = 0
+    llama_context_size: int = 0
     window_width: int = UIConstraints.WINDOW_WIDTH
     window_height: int = UIConstraints.WINDOW_HEIGHT
 

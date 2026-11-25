@@ -20,6 +20,7 @@ from core.exceptions import (
 )
 from core.hardware_detector import HardwareDetector
 from core.image_utils import is_pdf
+from core.llama_backend import LlamaServerBackend
 from core.models import BatchOCRJob
 from core.ocr_engine import OCREngine
 from core.output_workflow import OutputWorkflow
@@ -50,7 +51,13 @@ class AppController:
 
     def __init__(self, settings: Settings, *, engine: OCREngine | None = None) -> None:
         self._settings = settings
-        self._engine = engine or OCREngine()
+        # The backend is created at every model load, so a changed context size
+        # applies on the next (re)load.
+        self._engine = engine or OCREngine(
+            backend_factory=lambda: LlamaServerBackend(
+                context_size=self._settings.llama_context_size
+            )
+        )
         self._hardware_detector = HardwareDetector()
         self._operation_lock = threading.RLock()
         self._operation = OP_IDLE

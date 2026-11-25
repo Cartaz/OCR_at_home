@@ -109,3 +109,11 @@ def test_legacy_keys_are_ignored(settings_path) -> None:
     loaded = Settings.load()
     assert loaded.batch_auto_save is True
     assert not hasattr(loaded, "language")
+
+
+def test_llama_context_defaults_to_llama_cpp_and_is_validated() -> None:
+    assert Settings().llama_context_size == 0
+    assert Settings().with_(llama_context_size=16384).llama_context_size == 16384
+    for bad in (100, -1, 2_000_000, "16384", True):
+        with pytest.raises(ValueError):
+            Settings().with_(llama_context_size=bad)

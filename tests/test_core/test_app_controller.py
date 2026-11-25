@@ -352,3 +352,13 @@ def test_invalid_settings_update_is_rejected_without_persisting(monkeypatch) -> 
     controller.update_settings(batch_auto_save=True)
     assert controller.settings.batch_auto_save is True and len(saved) == 1
     controller.shutdown()
+
+
+def test_context_size_applies_at_the_next_model_load(monkeypatch) -> None:
+    monkeypatch.setattr(Settings, "save", lambda self: None)
+    controller = AppController(Settings())
+    factory = controller._engine._backend_factory  # type: ignore[attr-defined]
+    assert factory()._runtime_args() == []
+    controller.update_settings(llama_context_size=8192)
+    assert factory()._runtime_args() == ["-c", "8192"]
+    controller.shutdown()

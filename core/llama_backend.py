@@ -47,7 +47,9 @@ class LlamaServerBackend:
 
     _LOG_MAX_BYTES = 5 * 1024 * 1024
 
-    def __init__(self) -> None:
+    def __init__(self, *, context_size: int = 0) -> None:
+        # 0 keeps llama.cpp's own default; a positive value is passed as -c.
+        self._context_size = int(context_size)
         self._process: subprocess.Popen[Any] | None = None
         self._process_group_id: int | None = None
         self._process_lock = threading.RLock()
@@ -62,8 +64,9 @@ class LlamaServerBackend:
     # --- customization points ---------------------------------------------
 
     def _runtime_args(self) -> list[str]:
-        """Production passes no tuning flags: llama.cpp keeps its stock defaults."""
-        return []
+        """Production keeps llama.cpp's stock tuning; only the user's context cap
+        (Settings → "Contesto llama-server") is passed when set."""
+        return ["-c", str(self._context_size)] if self._context_size > 0 else []
 
     def _log_path(self) -> Path:
         return AppMeta.LLAMA_SERVER_LOG_PATH

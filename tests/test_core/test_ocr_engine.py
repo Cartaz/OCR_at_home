@@ -98,3 +98,27 @@ def test_process_requires_initialized_backend(tmp_path) -> None:
     engine = OCREngine(backend_factory=FakeBackend)
     with pytest.raises(OCREngineNotInitializedError):
         engine.process_image(tmp_path / "x.png")
+
+
+def test_shutdown_is_bounded_when_an_inference_is_stuck() -> None:
+    started = threading.Event()
+    never = threading.Event()
+
+    class StuckBackend(FakeBackend):
+        def process_image(self, *_args, **_kwargs):
+            started.set()
+            never.wait(5)
+
+    backend = StuckBackend()
+    engine = OCREngine(backend_factory=lambda: backend)
+    engine.initialize()
+    worker = threading.Thread(target=lambda: engine.process_image("x.png"), daemon=True)
+    worker.start()
+    assert started.wait(1)
+    import time as _time
+
+    t0 = _time.monotonic()
+    engine.shutdown(inference_timeout=0.3)
+    assert _time.monotonic() - t0 < 2
+    assert backend.shutdown_calls == 1
+    never.set()

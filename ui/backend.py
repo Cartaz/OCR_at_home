@@ -322,7 +322,9 @@ class UiBackend(QObject):
         self._pdf_parts = []
         self._single_text = ""
         self._completed_source = ""
-        self._single_meta = f"Elaborazione di {_basename(str(data.get('image_path') or self._single_path))}…"
+        source = str(data.get("image_path") or self._single_path)
+        name = self._single_name if source == self._single_path and self._single_name else _basename(source)
+        self._single_meta = f"Elaborazione di {name}…"
         self._single_progress.show(
             "Preparazione PDF" if self._single_is_pdf else "Elaborazione immagine"
         )

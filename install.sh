@@ -97,10 +97,17 @@ if "$VENV_DIR/bin/python" -m pip show PySide6 >/dev/null 2>&1; then
     # Fino alla 1.0 l'interfaccia usava Qt WebEngine tramite il metapacchetto
     # PySide6 (WebEngine + Addons, ~300 MB). L'interfaccia QML richiede solo
     # PySide6-Essentials: i pacchetti condividono file, quindi si rimuovono
-    # tutti e il passo successivo reinstalla solo quelli necessari.
+    # tutti e si reinstalla solo il necessario. Le wheel vengono scaricate
+    # PRIMA della rimozione: se il download fallisce il venv resta intatto.
+    WHEEL_DIR="$(mktemp -d)"
+    trap 'rm -rf "$WHEEL_DIR"' EXIT
+    log "Scarico le dipendenze della nuova interfaccia QML"
+    "$VENV_DIR/bin/python" -m pip download -q -r "$SCRIPT_DIR/requirements.txt" -d "$WHEEL_DIR"
     log "Rimuovo Qt WebEngine e il metapacchetto PySide6 non più usati"
     "$VENV_DIR/bin/python" -m pip uninstall -y \
         PySide6 PySide6_Addons PySide6_Essentials PySide6_WebEngine PySide6_Pdf
+    "$VENV_DIR/bin/python" -m pip install --no-index --find-links "$WHEEL_DIR" \
+        -r "$SCRIPT_DIR/requirements.txt"
 fi
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 verify_python_runtime

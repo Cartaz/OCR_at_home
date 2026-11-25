@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _SESSION_PREFIX = "session-"
 _LOCK_NAME = ".owner.lock"
+_LEGACY_STALE_S = 24 * 3600
 
 
 class InputStaging:
@@ -79,8 +80,15 @@ class InputStaging:
                 # directory only after locking it (see _ensure_session_dir).
                 fd = os.open(lock_path, os.O_RDWR)
             except FileNotFoundError:
-                shutil.rmtree(candidate, ignore_errors=True)  # pre-lock legacy session
-                removed += 1
+                # Created by a version without locks, possibly still running:
+                # only remove it once it is clearly stale.
+                try:
+                    stale = candidate.stat().st_mtime < time.time() - _LEGACY_STALE_S
+                except OSError:
+                    stale = False
+                if stale:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    removed += 1
                 continue
             except OSError:
                 continue

@@ -38,3 +38,8 @@ def test_runtime_env_respects_a_user_device_selector(monkeypatch) -> None:
     env = llama_gpu_detect.sycl_runtime_env()
     assert env["ONEAPI_DEVICE_SELECTOR"] == "level_zero:0"
     assert env["GGML_SYCL"] == "1"
+
+
+def test_empty_device_description_does_not_swallow_the_next_line(monkeypatch) -> None:
+    monkeypatch.setattr(llama_gpu_detect.subprocess, "run", _run("Available devices:\n  SYCL0:\nnext line\n"))
+    assert llama_gpu_detect.list_sycl_devices("/fake") == ["SYCL0"]

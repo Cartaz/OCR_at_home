@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QTimer, QUrl
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QWindow
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
 from shiboken6 import delete
@@ -67,6 +67,8 @@ class QmlMainWindow(QObject):
     def _persist_geometry(self) -> None:
         if self._shutdown:
             return
+        if self._window.visibility() != QWindow.Visibility.Windowed:
+            return  # never store a maximized/fullscreen size as the normal size
         width, height = self._window.width(), self._window.height()
         settings = self._backend.settings
         if (width, height) != (settings["window_width"], settings["window_height"]):

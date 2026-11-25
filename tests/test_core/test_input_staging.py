@@ -48,10 +48,15 @@ def test_orphaned_sessions_are_purged_but_live_ones_are_kept(tmp_path: Path) -> 
     orphan = root / "session-crashed"
     orphan.mkdir()
     (orphan / "clipboard-old.png").write_bytes(b"\x89PNG")
+    old = __import__("time").time() - 2 * 24 * 3600
+    __import__("os").utime(orphan, (old, old))
+    recent_legacy = root / "session-legacy-running"
+    recent_legacy.mkdir()
 
     fresh = InputStaging(root, max_bytes=1024)
     assert fresh.purge_orphaned_sessions() == 1
     assert not orphan.exists()
+    assert recent_legacy.exists()  # may belong to an older version still running
     assert live.session_dir is not None and live.session_dir.exists()
     live.shutdown()
     fresh.shutdown()

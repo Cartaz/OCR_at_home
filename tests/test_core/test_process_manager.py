@@ -148,3 +148,24 @@ def test_batch_started_is_published_before_worker_can_emit_results() -> None:
         EventBus.unsubscribe("batch_started", capture_started)
         EventBus.unsubscribe("batch_task_completed", capture_task)
         manager.shutdown()
+
+
+def test_shutdown_is_bounded_when_a_task_ignores_cancellation() -> None:
+    import time as _time
+
+    never = threading.Event()
+    started = threading.Event()
+
+    class StuckEngine:
+        def process_image(self, *_args, **_kwargs):
+            started.set()
+            never.wait(5)
+            return OCRResult(text="late")
+
+    manager = ProcessManager(StuckEngine())  # type: ignore[arg-type]
+    manager.submit_batch([Path("a.png")])
+    assert started.wait(1)
+    t0 = _time.monotonic()
+    manager.shutdown(wait_seconds=0.3)
+    assert _time.monotonic() - t0 < 2
+    never.set()

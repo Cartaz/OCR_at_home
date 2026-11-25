@@ -290,3 +290,11 @@ def test_selecting_a_new_file_clears_the_previous_result(make_backend, tmp_path)
     assert backend.canCopySingle is True
     backend._apply_single_selection(str(_image(tmp_path, "b.png").resolve()))
     assert backend.singleText == "" and backend.canCopySingle is False
+
+
+def test_progress_uses_the_friendly_clipboard_name(make_backend, tmp_path) -> None:
+    backend, _ = make_backend()
+    staged = str(_image(tmp_path, "clipboard-k3j2abcd.png").resolve())
+    backend._apply_single_selection(staged, "Immagine dagli appunti.png")
+    EventBus.emit("ocr_started", {"mode": "single", "image_path": staged, "is_pdf": False})
+    assert backend.singleMeta == "Elaborazione di Immagine dagli appunti.png…"

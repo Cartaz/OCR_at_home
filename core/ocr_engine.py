@@ -104,15 +104,26 @@ class OCREngine:
         finally:
             self._inference_lock.release()
 
-    def shutdown(self) -> None:
-        """Release the backend; waits for an in-flight inference to return."""
-        with self._inference_lock:
+    def shutdown(self, *, inference_timeout: float = 10.0) -> None:
+        """Release the backend.
+
+        Waits a bounded time for an in-flight inference to return; a stuck
+        inference does not keep the app alive: the server is stopped anyway,
+        which makes the stuck request fail.
+        """
+        acquired = self._inference_lock.acquire(timeout=max(0.0, inference_timeout))
+        if not acquired:
+            logger.warning("Inferenza ancora in corso allo shutdown: arresto forzato del backend")
+        try:
             with self._lifecycle_lock:
                 backend = self._backend
                 self._backend = None
                 self._generation += 1
             if backend is not None:
                 self._stop_backend(backend)
+        finally:
+            if acquired:
+                self._inference_lock.release()
 
     @staticmethod
     def _stop_backend(backend: LlamaServerBackend) -> None:

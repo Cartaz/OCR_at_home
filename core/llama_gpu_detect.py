@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 GPU_OFFLOAD_ALL_LAYERS = 99
 DEFAULT_ONEAPI_DEVICE_SELECTOR = "level_zero:0"
-_SYCL_DEVICE_LINE = re.compile(r"^\s*(SYCL\d+)\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+_SYCL_DEVICE_LINE = re.compile(r"^[ \t]*(SYCL\d+)[ \t]*:[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE)
 
 
 def _project_root() -> Path:

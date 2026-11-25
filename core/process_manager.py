@@ -38,6 +38,8 @@ class ProcessManager:
         self._lock = threading.RLock()
         self._on_job_finished = on_job_finished
         self._shutting_down = False
+        self._idle = threading.Event()
+        self._idle.set()
 
     def submit_batch(
         self, image_paths: list[Path], *, preprocessing_enabled: bool = True,
@@ -66,6 +68,7 @@ class ProcessManager:
             token = CancellationToken()
             self._active_job = job
             self._active_token = token
+            self._idle.clear()
 
         # Subscribers such as OutputWorkflow must freeze batch policy before the
         # worker is allowed to emit task/completion events.
@@ -92,6 +95,7 @@ class ProcessManager:
             if self._active_job is job:
                 self._active_job = None
                 self._active_token = None
+                self._idle.set()
 
     def cancel_active_batch(self) -> None:
         with self._lock:
@@ -236,7 +240,7 @@ class ProcessManager:
             if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
         )
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait_seconds: float = 15.0) -> None:
         with self._lock:
             if self._shutting_down:
                 return
@@ -244,5 +248,8 @@ class ProcessManager:
             token = self._active_token
         if token is not None:
             token.cancel()
-        # wait=True evita di distruggere l'engine mentre il worker lo usa.
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        # Wait (bounded) so the engine is not torn down under a cooperative
+        # worker; a worker stuck in non-cancellable work must not block exit.
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        if not self._idle.wait(timeout=wait_seconds):
+            logger.warning("Worker batch non terminato entro %.0f s allo shutdown", wait_seconds)

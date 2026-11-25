@@ -51,7 +51,7 @@ The OCR output is aligned globally against the complete handwritten ground truth
 Close the desktop OCR application first, then:
 
 ```bash
-.venv/bin/python tests/benchmark/run_realworld_suite.py
+.venv/bin/python benchmarks/run_realworld_suite.py
 ```
 
 Four Qt dialogs select FACILE, MEDIO, DIFFICILE and the Markdown ground truth.
@@ -59,7 +59,7 @@ Four Qt dialogs select FACILE, MEDIO, DIFFICILE and the Markdown ground truth.
 Non-interactive:
 
 ```bash
-.venv/bin/python tests/benchmark/run_realworld_suite.py \
+.venv/bin/python benchmarks/run_realworld_suite.py \
   --easy /path/digital.pdf \
   --medium /path/dense-scan.pdf \
   --hard /path/handwriting.png \
@@ -70,7 +70,7 @@ Non-interactive:
 Validate the corpus and inspect the estimated plan without inference:
 
 ```bash
-.venv/bin/python tests/benchmark/run_realworld_suite.py --plan-only
+.venv/bin/python benchmarks/run_realworld_suite.py --plan-only
 ```
 
 ## Statistical protocol
@@ -220,7 +220,7 @@ Ranking rows include pipeline values, runtime values, overall CER/WER/accuracy, 
 The benchmark checkpoints after every document. Resume with:
 
 ```bash
-.venv/bin/python tests/benchmark/run_realworld_suite.py \
+.venv/bin/python benchmarks/run_realworld_suite.py \
   --resume benchmark-results/realworld-v2-YYYYMMDD-HHMMSS
 ```
 
@@ -229,9 +229,9 @@ All four input hashes are checked before continuing. Memory isolation is part of
 The run can also be deliberately split:
 
 ```bash
-.venv/bin/python tests/benchmark/run_realworld_suite.py --stop-after prompt
-.venv/bin/python tests/benchmark/run_realworld_suite.py --resume <dir> --stop-after stage-a
-.venv/bin/python tests/benchmark/run_realworld_suite.py --resume <dir>
+.venv/bin/python benchmarks/run_realworld_suite.py --stop-after prompt
+.venv/bin/python benchmarks/run_realworld_suite.py --resume <dir> --stop-after stage-a
+.venv/bin/python benchmarks/run_realworld_suite.py --resume <dir>
 ```
 
 ## Privacy

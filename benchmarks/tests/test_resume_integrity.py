@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.benchmark.resume_integrity import (
+from benchmarks.resume_integrity import (
     assert_resume_compatible,
     validate_resume_preflight,
 )
-from tests.benchmark.runtime_backend import RuntimeCapabilities
+from benchmarks.runtime_backend import RuntimeCapabilities
 
 
 def _capabilities(
@@ -96,7 +96,7 @@ def test_preflight_without_resume_does_not_probe_runtime(monkeypatch) -> None:
         raise AssertionError("runtime probe should not run")
 
     monkeypatch.setattr(
-        "tests.benchmark.resume_integrity.detect_runtime_capabilities",
+        "benchmarks.resume_integrity.detect_runtime_capabilities",
         fail_if_called,
     )
 
@@ -113,7 +113,7 @@ def test_preflight_reads_checkpoint_and_checks_runtime(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "tests.benchmark.resume_integrity.detect_runtime_capabilities",
+        "benchmarks.resume_integrity.detect_runtime_capabilities",
         _capabilities,
     )
 

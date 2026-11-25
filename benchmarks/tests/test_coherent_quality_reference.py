@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from tests.benchmark.coherent_quality_reference import quality_reference
-from tests.benchmark.realworld_suite_v2 import (
+from benchmarks.coherent_quality_reference import quality_reference
+from benchmarks.realworld_suite_v2 import (
     ConfigAggregate,
     DocumentAggregate,
     QualityAggregate,
@@ -139,7 +139,7 @@ def test_selector_cannot_end_with_zero_passes_when_valid_profiles_exist(monkeypa
     # select_fastest_quality_gated_values resolves quality_reference from its
     # defining module at call time; patching that module is exactly what the
     # canonical entry point does.
-    import tests.benchmark.realworld_suite_v2 as suite
+    import benchmarks.realworld_suite_v2 as suite
 
     monkeypatch.setattr(suite, "quality_reference", quality_reference)
     chosen, gates = select_fastest_quality_gated_values(

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import importlib
 
-from tests.benchmark import canonical_policy
-from tests.benchmark import realworld_suite_v2 as suite
-from tests.benchmark import run_realworld_suite_v2 as runner
+from benchmarks import canonical_policy
+from benchmarks import realworld_suite_v2 as suite
+from benchmarks import run_realworld_suite_v2 as runner
 
 
 def test_canonical_policy_owns_current_baseline_and_schema() -> None:
@@ -25,7 +25,7 @@ def test_entrypoint_import_has_no_cross_module_mutation() -> None:
     runner_baseline = runner.production_baseline
     runner_quality = runner.quality_reference
 
-    from tests.benchmark import run_realworld_suite
+    from benchmarks import run_realworld_suite
 
     importlib.reload(run_realworld_suite)
 

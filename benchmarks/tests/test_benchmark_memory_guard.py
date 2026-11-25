@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from tests.benchmark.memory_guard import (
+from benchmarks.memory_guard import (
     MemorySampler,
     SystemMemorySnapshot,
     evict_file_cache,

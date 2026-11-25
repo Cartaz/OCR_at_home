@@ -7,12 +7,12 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from tests.benchmark.realworld_suite_v2 import (
+from benchmarks.realworld_suite_v2 import (
     DEFAULT_BEAM_WIDTH,
     DEFAULT_RUNS,
     DEFAULT_TOP_VALUES,
 )
-from tests.benchmark.runtime_backend import (
+from benchmarks.runtime_backend import (
     RuntimeCapabilities,
     detect_runtime_capabilities,
 )

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from tests.benchmark.realworld_suite_v2 import ConfigAggregate, QualityReference
+from benchmarks.realworld_suite_v2 import ConfigAggregate, QualityReference
 
 
 def quality_reference(aggregates: Sequence[ConfigAggregate]) -> QualityReference:

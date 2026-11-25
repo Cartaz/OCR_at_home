@@ -1,4 +1,4 @@
-"""Regression tests for benchmark-only pipeline overrides."""
+"""Benchmark-only overrides must never change the production request shape."""
 
 from __future__ import annotations
 
@@ -7,14 +7,9 @@ import json
 import numpy as np
 from PIL import Image
 
-from core import llama_backend, llama_ocr_api
+from core import llama_ocr_api
 from core.image_preprocessor import ImagePreprocessor
-from tests.benchmark import canonical_policy
-from tests.benchmark.run_pipeline_benchmark import (
-    BENCHMARK_CONTEXT_SIZE,
-    BENCHMARK_MAX_IMAGE_DIM,
-    pipeline_configs,
-)
+from benchmarks import canonical_policy
 
 
 class _FakeResponse:
@@ -71,23 +66,12 @@ def test_benchmark_can_explicitly_disable_prompt_cache(monkeypatch) -> None:
     assert metrics["cache_prompt"] is False
 
 
-def test_pipeline_benchmark_defaults_are_uncapped_and_16k_only() -> None:
-    baseline = pipeline_configs()[0]
-    assert BENCHMARK_CONTEXT_SIZE == 16384
-    assert BENCHMARK_MAX_IMAGE_DIM == 8192
-    assert baseline.name == "baseline"
-    assert baseline.max_image_dim == 8192
-    # Production no longer forces a llama.cpp context size.
-    assert llama_backend.CONTEXT_SIZE is None
-
-
 def test_realworld_benchmark_baseline_uses_stock_llama_runtime() -> None:
     baseline = canonical_policy.production_baseline("OCR", name="test")
     assert canonical_policy.BENCHMARK_BASELINE_MAX_IMAGE_DIM == 8192
     assert baseline.max_image_dim == 8192
     assert baseline.runtime.cli_args() == []
     assert baseline.runtime.context_size is None
-    assert llama_backend.CONTEXT_SIZE is None
     assert llama_ocr_api.MAX_IMAGE_DIM == 8192
 
 

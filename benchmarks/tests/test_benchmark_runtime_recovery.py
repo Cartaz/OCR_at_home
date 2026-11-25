@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from tests.benchmark import run_realworld_suite_v2 as runner
-from tests.benchmark.realworld_suite_v2 import BenchmarkDocument, Observation, PipelineConfig
+from benchmarks import run_realworld_suite_v2 as runner
+from benchmarks.realworld_suite_v2 import BenchmarkDocument, Observation, PipelineConfig
 
 
 class _Diagnostics:

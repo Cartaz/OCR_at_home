@@ -20,12 +20,13 @@ from typing import Any, Sequence
 
 from PIL import Image, ImageDraw
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.llama_ocr_api import ocr_pdf, ocr_single_image  # noqa: E402
-from tests.benchmark.canonical_policy import (  # noqa: E402
+from core.models import combine_pdf_pages  # noqa: E402
+from benchmarks.canonical_policy import (  # noqa: E402
     CHECKPOINT_SCHEMA,
     fastest_quality_equivalent,
     load_ground_truth,
@@ -35,14 +36,14 @@ from tests.benchmark.canonical_policy import (  # noqa: E402
     select_fastest_quality_gated_values,
     stage_a_groups,
 )
-from tests.benchmark.memory_guard import (  # noqa: E402
+from benchmarks.memory_guard import (  # noqa: E402
     MEMORY_ISOLATION_VERSION,
     MEMORY_PRESSURE_FLOOR_MIB,
     MemorySampler,
     process_rss_mib,
     settle_benchmark_memory,
 )
-from tests.benchmark.realworld_suite_v2 import (  # noqa: E402
+from benchmarks.realworld_suite_v2 import (  # noqa: E402
     BENCHMARK_SEED,
     DEFAULT_BEAM_WIDTH,
     DEFAULT_RUNS,
@@ -67,7 +68,7 @@ from tests.benchmark.realworld_suite_v2 import (  # noqa: E402
     score_document,
     sha256_file,
 )
-from tests.benchmark.runtime_backend import (  # noqa: E402
+from benchmarks.runtime_backend import (  # noqa: E402
     BenchmarkLlamaServerBackend,
     RuntimeCapabilities,
     ServerRuntimeConfig,
@@ -118,7 +119,7 @@ def _select_file(title: str, filter_text: str) -> Path:
         from PySide6.QtWidgets import QApplication, QFileDialog
     except ImportError as exc:
         raise SystemExit("PySide6 necessario per i dialog file") from exc
-    app = QApplication.instance() or QApplication([])
+    _app = QApplication.instance() or QApplication([])  # keep a QApplication alive for the dialog
     filename, _ = QFileDialog.getOpenFileName(None, title, str(Path.home()), filter_text)
     if not filename:
         raise SystemExit(f"Selezione annullata: {title}")
@@ -357,7 +358,7 @@ def _run_document(
     try:
         with sampler:
             if document.is_pdf:
-                output, _ = ocr_pdf(
+                output = combine_pdf_pages(ocr_pdf(
                     document.path,
                     backend.server_url,
                     preprocessing_mode=config.preprocessing_mode,
@@ -368,10 +369,10 @@ def _run_document(
                     jpeg_quality=config.jpeg_quality,
                     cache_prompt=False,
                     page_metrics=pages,
-                )
+                ))
             else:
                 metrics: dict[str, Any] = {}
-                output, _ = ocr_single_image(
+                output = ocr_single_image(
                     document.path,
                     backend.server_url,
                     preprocessing_mode=config.preprocessing_mode,

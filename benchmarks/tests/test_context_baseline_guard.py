@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.benchmark.runtime_backend import (
+from benchmarks.runtime_backend import (
     RuntimeCapabilities,
     ServerRuntimeConfig,
     production_runtime_config,
@@ -34,7 +34,7 @@ def test_realworld_baseline_is_stock_without_removing_context_candidates() -> No
 
 
 def test_canonical_entrypoint_uses_stock_baseline_checkpoint_schema() -> None:
-    from tests.benchmark import run_realworld_suite  # noqa: F401
-    from tests.benchmark import run_realworld_suite_v2 as runner
+    from benchmarks import run_realworld_suite  # noqa: F401
+    from benchmarks import run_realworld_suite_v2 as runner
 
     assert runner.CHECKPOINT_SCHEMA == 7

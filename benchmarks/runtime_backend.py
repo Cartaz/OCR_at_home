@@ -10,23 +10,14 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from config.constants import AppMeta
-from core.event_bus import EventBus
-from core.exceptions import ModelLoadError
-from core.llama_backend import (
-    LLAMA_SERVER_HOST,
-    N_PARALLEL,
-    LlamaServerBackend,
-)
-from core.llama_gpu_detect import GPU_OFFLOAD_ALL_LAYERS, find_llama_server, venv_lib_env
+from core.llama_backend import LlamaServerBackend
+from core.llama_gpu_detect import find_llama_server, sycl_runtime_env
 from core.llama_models import GGUF_CACHE_DIR, GGUF_MODEL_FILES
-from core.owned_process import spawn_owned_process
-from tests.benchmark.memory_guard import process_rss_mib
 
 CACHE_TYPES = ("f16", "bf16", "q8_0", "q5_0", "q4_0")
 FLASH_ATTN_VALUES = ("auto", "on", "off")
@@ -177,21 +168,14 @@ class ServerFailureDiagnostics:
 
 
 def benchmark_cache_paths() -> tuple[Path, ...]:
-    return tuple(GGUF_CACHE_DIR / filename for filename in GGUF_MODEL_FILES.values())
+    return tuple(GGUF_CACHE_DIR / spec.filename for spec in GGUF_MODEL_FILES.values())
 
 
 def detect_runtime_capabilities() -> RuntimeCapabilities:
     server_path = find_llama_server()
     if not server_path:
         raise RuntimeError("llama-server non trovato; esegui ./install.sh")
-    env = venv_lib_env()
-    env.update(
-        {
-            "GGML_SYCL": "1",
-            "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
-            "ZES_ENABLE_SYSMAN": "1",
-        }
-    )
+    env = sycl_runtime_env()
     help_proc = subprocess.run(
         [server_path, "--help"],
         stdout=subprocess.PIPE,
@@ -232,9 +216,14 @@ def detect_runtime_capabilities() -> RuntimeCapabilities:
     )
 
 
+def _optimal_thread_count() -> int:
+    n_cpu = os.cpu_count() or 8
+    return max(2, min(n_cpu, max(4, n_cpu - 2)))
+
+
 def thread_candidates() -> tuple[int, ...]:
     n_cpu = os.cpu_count() or 8
-    optimal = LlamaServerBackend._optimal_thread_count()
+    optimal = _optimal_thread_count()
     values = {2, 4, max(2, n_cpu // 2), optimal, n_cpu}
     return tuple(sorted(value for value in values if 1 <= value <= n_cpu))
 
@@ -263,11 +252,20 @@ def runtime_stage_a_values(capabilities: RuntimeCapabilities) -> dict[str, list[
 class BenchmarkLlamaServerBackend(LlamaServerBackend):
     """Owned SYCL backend with one explicit benchmark runtime profile."""
 
+    _LOG_MAX_BYTES = 10 * 1024 * 1024
+
     def __init__(self, runtime: ServerRuntimeConfig) -> None:
         super().__init__()
         self.runtime = runtime.resolved()
-        self._benchmark_log_path: Path | None = None
-        self._benchmark_log_start_offset = 0
+
+    def _runtime_args(self) -> list[str]:
+        return self.runtime.cli_args()
+
+    def _log_path(self) -> Path:
+        return AppMeta.CONFIG_DIR / "llama-server-benchmark.log"
+
+    def _startup_message(self) -> str:
+        return f"Benchmark llama-server: {self.runtime.signature()}"
 
     @property
     def process_pid(self) -> int | None:
@@ -278,22 +276,8 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
     def failure_diagnostics(self, *, tail_chars: int = 4000) -> ServerFailureDiagnostics:
         with self._process_lock:
             process = self._process
-            log_path = self._benchmark_log_path
-            log_start_offset = self._benchmark_log_start_offset
-
         returncode = None if process is None else process.poll()
-        text = ""
-        if log_path is not None:
-            try:
-                size = log_path.stat().st_size
-                start = min(max(0, int(log_start_offset)), size)
-                with log_path.open("rb") as handle:
-                    handle.seek(start)
-                    text = handle.read().decode("utf-8", errors="replace")
-            except OSError:
-                text = ""
-
-        tail = text[-max(0, int(tail_chars)) :]
+        tail = self._read_log_tail(tail_chars)
         normalized = tail.casefold()
         suspected_oom = returncode == -9 or any(
             marker in normalized for marker in _OOM_MARKERS
@@ -304,118 +288,3 @@ class BenchmarkLlamaServerBackend(LlamaServerBackend):
             suspected_oom=suspected_oom,
             log_tail=tail,
         )
-
-    def _start_server(
-        self,
-        *,
-        gpu_layers: int,
-        gpu_backend: str,
-        cancel_token,
-    ) -> None:
-        if not self._server_path:
-            raise ModelLoadError("llama-server", "Percorso server mancante")
-        if gpu_backend != "sycl" or gpu_layers < GPU_OFFLOAD_ALL_LAYERS:
-            raise ModelLoadError(
-                "llama-server",
-                "Profilo non SYCL/full-offload rifiutato dalla configurazione strict.",
-            )
-
-        main_model = self._model_paths.get("main")
-        mmproj_model = self._model_paths.get("mmproj")
-        if main_model is None or not main_model.is_file():
-            raise ModelLoadError("llama-server", f"Modello GGUF non trovato: {main_model}")
-        if mmproj_model is None or not mmproj_model.is_file():
-            raise ModelLoadError("llama-server", f"Proiettore multimodale non trovato: {mmproj_model}")
-
-        runtime = self.runtime
-        port = self._allocate_port()
-        url = f"http://{LLAMA_SERVER_HOST}:{port}"
-        cmd = [
-            self._server_path,
-            "-m",
-            str(main_model),
-            "--mmproj",
-            str(mmproj_model),
-            "--port",
-            str(port),
-            "--host",
-            LLAMA_SERVER_HOST,
-            "-ngl",
-            str(GPU_OFFLOAD_ALL_LAYERS),
-            *runtime.cli_args(),
-            "--parallel",
-            str(N_PARALLEL),
-            "--metrics",
-        ]
-
-        env = venv_lib_env()
-        env.update(
-            {
-                "GGML_SYCL": "1",
-                "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
-                "ZES_ENABLE_SYSMAN": "1",
-            }
-        )
-
-        AppMeta.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        log_path = AppMeta.CONFIG_DIR / "llama-server-benchmark.log"
-        if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
-            log_path.unlink()
-        log_start_offset = log_path.stat().st_size if log_path.exists() else 0
-
-        EventBus.emit(
-            "model_load_progress",
-            {"message": f"Benchmark llama-server: {runtime.signature()}"},
-        )
-
-        log_file: Any = None
-        try:
-            log_file = open(log_path, "a", encoding="utf-8")
-            handle = spawn_owned_process(cmd, stdout=log_file, env=env)
-            process = handle.process
-        except Exception as exc:
-            if log_file is not None:
-                try:
-                    log_file.close()
-                except Exception:
-                    pass
-            raise ModelLoadError("llama-server", f"Impossibile avviare benchmark runtime: {exc}") from exc
-
-        with self._process_lock:
-            self._log_file = log_file
-            self._process = process
-            self._process_group_id = handle.process_group_id
-            self._server_port = port
-            self._server_url = url
-            self._benchmark_log_path = log_path
-            self._benchmark_log_start_offset = log_start_offset
-
-        def stop_owned_process() -> None:
-            self._stop_server()
-
-        if cancel_token is not None:
-            cancel_token.register_closer(stop_owned_process)
-        try:
-            deadline = time.monotonic() + 90.0
-            while time.monotonic() < deadline:
-                if cancel_token is not None:
-                    cancel_token.raise_if_cancelled()
-                if process.poll() is not None:
-                    tail = ""
-                    try:
-                        tail = log_path.read_text(encoding="utf-8", errors="replace")[-3000:]
-                    except OSError:
-                        pass
-                    raise ModelLoadError(
-                        "llama-server",
-                        f"Profilo runtime non avviabile (exit {process.returncode}): {tail}",
-                    )
-                if self.is_server_running:
-                    return
-                time.sleep(0.25)
-        finally:
-            if cancel_token is not None:
-                cancel_token.unregister_closer(stop_owned_process)
-
-        self._stop_server()
-        raise ModelLoadError("llama-server", "Profilo runtime non pronto entro 90 secondi")

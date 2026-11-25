@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tests.benchmark.runtime_backend import (
+from benchmarks.runtime_backend import (
     BenchmarkLlamaServerBackend,
     ServerRuntimeConfig,
 )
@@ -18,8 +18,8 @@ def test_failure_diagnostics_do_not_inherit_old_oom_log_entries(tmp_path) -> Non
     log_path.write_text(old + current, encoding="utf-8")
 
     backend._process = SimpleNamespace(poll=lambda: 1)  # type: ignore[attr-defined]
-    backend._benchmark_log_path = log_path  # type: ignore[attr-defined]
-    backend._benchmark_log_start_offset = len(old.encode("utf-8"))  # type: ignore[attr-defined]
+    backend._active_log_path = log_path  # type: ignore[attr-defined]
+    backend._log_start_offset = len(old.encode("utf-8"))  # type: ignore[attr-defined]
 
     diagnostics = backend.failure_diagnostics()
 
@@ -39,8 +39,8 @@ def test_failure_diagnostics_recognize_current_oom_marker(tmp_path) -> None:
     )
 
     backend._process = SimpleNamespace(poll=lambda: 1)  # type: ignore[attr-defined]
-    backend._benchmark_log_path = log_path  # type: ignore[attr-defined]
-    backend._benchmark_log_start_offset = 0  # type: ignore[attr-defined]
+    backend._active_log_path = log_path  # type: ignore[attr-defined]
+    backend._log_start_offset = 0  # type: ignore[attr-defined]
 
     diagnostics = backend.failure_diagnostics()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.benchmark.ground_truth_parser import parse_ground_truth_markdown
+from benchmarks.ground_truth_parser import parse_ground_truth_markdown
 
 
 def test_plain_markdown_ground_truth_accepts_internal_headings() -> None:

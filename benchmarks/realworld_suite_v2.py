@@ -21,7 +21,7 @@ from core.llama_ocr_api import (
     PROMPT_LEGACY_OCR,
     PROMPT_TEXT_RECOGNITION,
 )
-from tests.benchmark.runtime_backend import (
+from benchmarks.runtime_backend import (
     RuntimeCapabilities,
     ServerRuntimeConfig,
     stock_runtime_config,

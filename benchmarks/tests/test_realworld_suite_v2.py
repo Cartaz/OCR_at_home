@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.benchmark.realworld_suite_v2 import (
+from benchmarks.realworld_suite_v2 import (
     HANDWRITING_SEGMENTS,
     ConfigAggregate,
     DocumentAggregate,
@@ -23,8 +23,8 @@ from tests.benchmark.realworld_suite_v2 import (
     trim_for_runs,
     trimmed_mean,
 )
-from tests.benchmark.runtime_backend import RuntimeCapabilities, ServerRuntimeConfig
-from tests.benchmark.realworld_suite_v2 import BenchmarkDocument, Observation
+from benchmarks.runtime_backend import RuntimeCapabilities, ServerRuntimeConfig
+from benchmarks.realworld_suite_v2 import BenchmarkDocument, Observation
 
 
 def _markdown() -> str:

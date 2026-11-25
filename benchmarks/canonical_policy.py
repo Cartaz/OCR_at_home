@@ -11,9 +11,9 @@ from dataclasses import replace
 from typing import Any, Sequence
 
 from core.llama_ocr_api import PROMPT_LEGACY_OCR, PROMPT_TEXT_RECOGNITION
-from tests.benchmark.coherent_quality_reference import quality_reference
-from tests.benchmark.ground_truth_parser import load_ground_truth
-from tests.benchmark.realworld_suite_v2 import (
+from benchmarks.coherent_quality_reference import quality_reference
+from benchmarks.ground_truth_parser import load_ground_truth  # noqa: F401 - canonical parser re-exported for the runner
+from benchmarks.realworld_suite_v2 import (
     JPEG_QUALITY_VALUES,
     MAX_IMAGE_DIM_VALUES,
     PDF_DPI_VALUES,
@@ -25,7 +25,7 @@ from tests.benchmark.realworld_suite_v2 import (
     classify_quality,
     config_variable_value,
 )
-from tests.benchmark.runtime_backend import (
+from benchmarks.runtime_backend import (
     RuntimeCapabilities,
     stock_runtime_config,
     runtime_stage_a_values,

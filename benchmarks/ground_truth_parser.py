@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Sequence
 
-from tests.benchmark.realworld_suite_v2 import GroundTruth, HANDWRITING_SEGMENTS
+from benchmarks.realworld_suite_v2 import GroundTruth, HANDWRITING_SEGMENTS
 
 
 def _section_body(markdown: str, title: str, next_titles: Sequence[str]) -> str:

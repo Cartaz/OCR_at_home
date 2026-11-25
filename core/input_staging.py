@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,13 @@ class InputStaging:
                 continue
             lock_path = candidate / _LOCK_NAME
             try:
-                fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                # Never create the lock: every live session publishes its
+                # directory only after locking it (see _ensure_session_dir).
+                fd = os.open(lock_path, os.O_RDWR)
+            except FileNotFoundError:
+                shutil.rmtree(candidate, ignore_errors=True)  # pre-lock legacy session
+                removed += 1
+                continue
             except OSError:
                 continue
             try:
@@ -87,6 +94,15 @@ class InputStaging:
                 removed += 1
             finally:
                 os.close(fd)
+        # A crash between mkdtemp() and rename() leaves a private staging dir.
+        stale_before = time.time() - 3600
+        for candidate in self._root.glob(".creating-*"):
+            try:
+                if candidate.stat().st_mtime < stale_before:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
         if removed:
             logger.info("Rimosse %d sessioni di input orfane", removed)
         return removed
@@ -94,9 +110,20 @@ class InputStaging:
     def _ensure_session_dir(self) -> Path:
         if self._session_dir is None:
             self._root.mkdir(parents=True, exist_ok=True)
-            session_dir = Path(tempfile.mkdtemp(prefix=_SESSION_PREFIX, dir=self._root))
-            fd = os.open(session_dir / _LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Lock under a private name, then publish atomically: a concurrent
+            # purge only ever sees session directories that are already locked.
+            staging = Path(tempfile.mkdtemp(prefix=".creating-", dir=self._root))
+            fd = -1
+            try:
+                fd = os.open(staging / _LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                session_dir = self._root / (_SESSION_PREFIX + staging.name.removeprefix(".creating-"))
+                staging.rename(session_dir)
+            except Exception:
+                if fd >= 0:
+                    os.close(fd)
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
             self._lock_fd = fd
             self._session_dir = session_dir
         return self._session_dir

@@ -354,6 +354,13 @@ def ocr_image_api(
         result = json.loads(raw.decode("utf-8"))
     except OperationCancelledError:
         raise
+    except TimeoutError as exc:
+        # A slow generation is not a dead server: never restart on timeout.
+        if cancel_token is not None and cancel_token.is_cancelled:
+            raise OperationCancelledError() from exc
+        raise RuntimeError(
+            f"llama-server non ha risposto entro {HTTP_TIMEOUT_S} secondi"
+        ) from exc
     except (OSError, http.client.HTTPException) as exc:
         if cancel_token is not None and cancel_token.is_cancelled:
             raise OperationCancelledError() from exc

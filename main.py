@@ -87,9 +87,13 @@ def main() -> int:
 
     # Python runs signal handlers only when the interpreter gets control: a
     # cheap timer wakes it while the Qt event loop is idle.
+    def request_quit(signum: int, _frame: object) -> None:
+        logger.info("Segnale %s ricevuto, arresto in corso...", signum)
+        # Queued: also honoured when the signal arrives before app.exec().
+        QTimer.singleShot(0, app.quit)
+
     for handled in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(handled, lambda signum, _frame: (
-            logger.info("Segnale %s ricevuto, arresto in corso...", signum), app.quit()))
+        signal.signal(handled, request_quit)
     signal_wakeup = QTimer()
     signal_wakeup.timeout.connect(lambda: None)
     signal_wakeup.start(200)

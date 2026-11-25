@@ -192,7 +192,9 @@ class LlamaServerBackend:
             self._log_start_offset = log_start_offset
 
         def stop_owned_process() -> None:
-            self._stop_server()
+            # Runs on the cancelling (GUI) thread: only signal. The startup
+            # loop below sees the cancellation and performs the blocking stop.
+            self._signal_server_stop()
 
         if cancel_token is not None:
             cancel_token.register_closer(stop_owned_process)
@@ -276,6 +278,21 @@ class LlamaServerBackend:
                 log_file.close()
             except Exception:
                 pass
+
+    def _signal_server_stop(self) -> None:
+        """Ask the owned server to exit without waiting for it."""
+        with self._process_lock:
+            process = self._process
+            process_group_id = self._process_group_id
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if os.name == "posix" and process_group_id is not None:
+                os.killpg(process_group_id, signal.SIGTERM)
+            else:
+                process.terminate()
+        except (ProcessLookupError, OSError):
+            pass
 
     def _server_crashed(self) -> bool:
         with self._process_lock:

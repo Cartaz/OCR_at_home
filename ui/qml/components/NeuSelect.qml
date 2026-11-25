@@ -16,9 +16,15 @@ Basic.ComboBox {
     opacity: enabled ? 1 : Theme.disabledOpacity
     Accessible.name: accessibleName
 
-    function selectValue(value) {
-        const index = indexOfValue(value)
-        currentIndex = index >= 0 ? index : 0
+    // A stored value missing from the options is added rather than silently
+    // replaced by the first option (it would be saved back on "Salva").
+    function selectValue(value, label) {
+        let index = indexOfValue(value)
+        if (index < 0) {
+            model = model.concat([{ text: label !== undefined ? label : String(value), value: value }])
+            index = indexOfValue(value)
+        }
+        currentIndex = index
     }
 
     background: Item {

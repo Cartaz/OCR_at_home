@@ -11,7 +11,7 @@ Column {
         const s = backend.settings
         preprocess.checked = s.preprocessing_enabled
         loadAtStartup.checked = s.load_model_at_startup
-        autoUnload.selectValue(s.model_auto_unload_minutes)
+        autoUnload.selectValue(s.model_auto_unload_minutes, s.model_auto_unload_minutes + " minuti")
         outputDir.text = s.output_dir
         batchAutoSave.checked = s.batch_auto_save
         batchFormat.selectValue(s.batch_output_format)

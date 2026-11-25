@@ -25,7 +25,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QGuiApplication
 
-from config.constants import AppMeta
+from config.constants import AppMeta, UIConstraints
 from core.app_controller import (
     OP_BATCH,
     OP_IDLE,
@@ -417,12 +417,16 @@ class UiBackend(QObject):
             if self._batch_states.get(path) in (_STATE_QUEUED, _STATE_RUNNING):
                 self._batch_states[path] = _STATE_CANCELLED
         self._batch_progress.label = "Batch annullato"
+        self._batch_progress.value = 1.0
         self.batchChanged.emit()
+        self._hide_progress_later(self._batch_progress, self.batchChanged)
         self._notice("Batch annullato", "L'elaborazione della coda è stata interrotta.")
 
     def _event_batch_failed(self, data: dict[str, Any]) -> None:
         self._batch_progress.label = "Batch terminato con errori"
+        self._batch_progress.value = 1.0
         self.batchChanged.emit()
+        self._hide_progress_later(self._batch_progress, self.batchChanged)
         self._notice(
             "Batch non completato",
             "Uno o più documenti non sono stati elaborati.",
@@ -552,7 +556,7 @@ class UiBackend(QObject):
         return self._model_ready
 
     def _get_can_reload_model(self) -> bool:
-        return self._is_idle() and self._backend_available
+        return self._is_idle() and self._backend_usable()
 
     def _get_reload_model_label(self) -> str:
         return "Ricarica modello" if self._model_ready else "Carica modello"
@@ -631,8 +635,12 @@ class UiBackend(QObject):
     def _get_can_choose_single(self) -> bool:
         return self._is_idle()
 
+    def _backend_usable(self) -> bool:
+        # A loaded model proves the runtime works even if a later probe failed.
+        return self._model_ready or self._backend_available
+
     def _get_can_start_single(self) -> bool:
-        return self._is_idle() and self._backend_available and bool(self._single_path)
+        return self._is_idle() and self._backend_usable() and bool(self._single_path)
 
     def _get_can_cancel_single(self) -> bool:
         return self._operation == OP_OCR
@@ -707,7 +715,7 @@ class UiBackend(QObject):
         return f"{count} {'file selezionato' if count == 1 else 'file selezionati'}"
 
     def _get_can_start_batch(self) -> bool:
-        return self._is_idle() and self._backend_available and bool(self._batch_paths)
+        return self._is_idle() and self._backend_usable() and bool(self._batch_paths)
 
     def _get_can_cancel_batch(self) -> bool:
         return self._operation == OP_BATCH
@@ -799,6 +807,8 @@ class UiBackend(QObject):
 
     @Slot(int, int)
     def saveWindowSize(self, width: int, height: int) -> None:
+        if width < UIConstraints.WINDOW_MIN_WIDTH or height < UIConstraints.WINDOW_MIN_HEIGHT:
+            return  # e.g. a tiling WM squeezed the window: keep the last real size
         try:
             self._controller.update_settings(window_width=int(width), window_height=int(height))
         except Exception:

@@ -68,7 +68,7 @@ def _available(backend: UiBackend) -> None:
 
 
 def test_start_is_enabled_only_with_backend_and_selection(make_backend, tmp_path) -> None:
-    backend, _ = make_backend()
+    backend, _ = make_backend(FakeController(model_ready=False))
     assert backend.canStartSingle is False
     backend._apply_single_selection(str(_image(tmp_path)))
     assert backend.canStartSingle is False  # backend not detected yet
@@ -249,3 +249,34 @@ def test_logs_are_read_as_a_bounded_tail(make_backend, monkeypatch, tmp_path) ->
     text = backend.readLogs(5000)
     assert text.splitlines()[-1] == "line 2999"
     assert len(text.splitlines()) == 2000
+
+
+def test_loaded_model_keeps_start_enabled_after_a_failed_probe(make_backend, tmp_path) -> None:
+    backend, _ = make_backend()
+    EventBus.emit("model_loaded", {})
+    EventBus.emit("hardware_detected", {"available": False, "label": "probe failed"})
+    backend._apply_single_selection(str(_image(tmp_path)))
+    assert backend.canStartSingle is True
+    assert backend.canReloadModel is True
+
+
+def test_window_sizes_below_the_minimum_are_not_persisted(make_backend) -> None:
+    backend, controller = make_backend()
+    backend.saveWindowSize(300, 900)
+    assert not [call for call in controller.calls if call[0] == "update_settings"]
+    backend.saveWindowSize(900, 700)
+    assert controller.settings.window_width == 900
+
+
+def test_batch_progress_hides_after_failure(make_backend, qapp) -> None:
+    import time as _time
+
+    backend, _ = make_backend()
+    EventBus.emit("batch_started", {"total_tasks": 1})
+    EventBus.emit("batch_failed", {"error": "x"})
+    assert backend.batchProgressVisible is True
+    deadline = _time.monotonic() + 2
+    while backend.batchProgressVisible and _time.monotonic() < deadline:
+        qapp.processEvents()
+        _time.sleep(0.02)
+    assert backend.batchProgressVisible is False

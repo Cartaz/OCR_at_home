@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from PIL import Image
 
 from core import llama_ocr_api
@@ -86,3 +88,16 @@ def test_official_task_prompt_can_be_selected_without_changing_default(monkeypat
     assert llama_ocr_api.PROMPT_FORMULA_RECOGNITION == "Formula Recognition:"
     assert _last_prompt() == "Text Recognition:"
     assert llama_ocr_api.OCR_PROMPT == "Text Recognition:"
+
+
+def test_read_timeout_is_not_reported_as_a_crashed_server(monkeypatch) -> None:
+    """Review fix: a slow generation must not trigger a server restart."""
+
+    class SlowConnection(_FakeConnection):
+        def getresponse(self):
+            raise TimeoutError("timed out")
+
+    monkeypatch.setattr(llama_ocr_api.http.client, "HTTPConnection", SlowConnection)
+    with pytest.raises(RuntimeError) as info:
+        llama_ocr_api.ocr_image_api(Image.new("RGB", (8, 8), "white"), "http://127.0.0.1:1")
+    assert not isinstance(info.value, llama_ocr_api.LlamaServerConnectionError)

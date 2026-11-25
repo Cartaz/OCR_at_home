@@ -1,7 +1,10 @@
 # Maintainer: Cartaz
 pkgname=glm-ocr
-pkgver=1.0.0
-pkgrel=4
+# Built from the git checkout: pkgver() derives the version from history.
+# Unlike install.sh (which pins and compiles llama.cpp), this package uses the
+# distribution's llama-cpp + ggml-sycl build.
+pkgver=1.1.0
+pkgrel=1
 pkgdesc="OCR locale con GLM-OCR e llama.cpp SYCL"
 arch=('x86_64')
 url="https://github.com/Cartaz/OCR_at_home"
@@ -19,6 +22,11 @@ depends=(
 makedepends=('git')
 source=("$pkgname::git+https://github.com/Cartaz/OCR_at_home.git")
 sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$pkgname"
+    printf "1.1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
 
 package() {
     local appdir="$pkgdir/usr/share/glm-ocr"

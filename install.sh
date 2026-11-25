@@ -23,7 +23,9 @@ require_project_files() {
         core/__init__.py \
         core/llama_models.py \
         config/__init__.py \
-        config/constants.py
+        config/constants.py \
+        ui/qml/Main.qml \
+        ui/qml/shaders/neumorphic.frag.qsb
     do
         if [[ ! -f "$SCRIPT_DIR/$relative" ]]; then
             warn "File applicativo mancante: $relative"
@@ -64,10 +66,12 @@ import numpy
 import PIL
 import pymupdf
 import huggingface_hub
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
+from PySide6.QtQuickControls2 import QQuickStyle
+from PySide6.QtWidgets import QSystemTrayIcon
 
-_ = numpy, PIL, pymupdf, huggingface_hub, QWebChannel, QWebEngineView
+_ = numpy, PIL, pymupdf, huggingface_hub, QQmlApplicationEngine, QQuickWindow, QQuickStyle, QSystemTrayIcon
 print("Import Python critici verificati")
 PY
 }
@@ -89,15 +93,28 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     "$PYTHON_CMD" -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+if "$VENV_DIR/bin/python" -m pip show PySide6 >/dev/null 2>&1; then
+    # Fino alla 1.0 l'interfaccia usava Qt WebEngine tramite il metapacchetto
+    # PySide6 (WebEngine + Addons, ~300 MB). L'interfaccia QML richiede solo
+    # PySide6-Essentials: i pacchetti condividono file, quindi si rimuovono
+    # tutti e il passo successivo reinstalla solo quelli necessari.
+    log "Rimuovo Qt WebEngine e il metapacchetto PySide6 non più usati"
+    "$VENV_DIR/bin/python" -m pip uninstall -y \
+        PySide6 PySide6_Addons PySide6_Essentials PySide6_WebEngine PySide6_Pdf
+fi
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 verify_python_runtime
+
+# Il primo GPU Level Zero è il default; un valore già esportato dall'utente
+# (sistemi con più GPU Intel) viene rispettato, come fa l'applicazione.
+SYCL_DEVICE_SELECTOR="${ONEAPI_DEVICE_SELECTOR:-level_zero:0}"
 
 venv_llama_sycl_works() {
     [[ -x "$VENV_DIR/bin/llama-server" ]] || return 1
     local output
     if ! output="$(
         ZES_ENABLE_SYSMAN=1 \
-        ONEAPI_DEVICE_SELECTOR=level_zero:0 \
+        ONEAPI_DEVICE_SELECTOR="$SYCL_DEVICE_SELECTOR" \
         LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             "$VENV_DIR/bin/llama-server" --list-devices 2>&1
     )"; then
@@ -108,7 +125,7 @@ venv_llama_sycl_works() {
 
 show_sycl_devices() {
     ZES_ENABLE_SYSMAN=1 \
-    ONEAPI_DEVICE_SELECTOR=level_zero:0 \
+    ONEAPI_DEVICE_SELECTOR="$SYCL_DEVICE_SELECTOR" \
     LD_LIBRARY_PATH="$VENV_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         "$VENV_DIR/bin/llama-server" --list-devices
 }
@@ -241,7 +258,7 @@ cat > "$DESKTOP_DIR/$APP_ID.desktop" <<EOF
 Type=Application
 Name=GLM OCR
 Comment=Riconoscimento ottico locale con GLM-OCR e llama.cpp SYCL
-Exec=$VENV_DIR/bin/python $SCRIPT_DIR/main.py
+Exec="$VENV_DIR/bin/python" "$SCRIPT_DIR/main.py"
 Icon=glm-ocr
 Terminal=false
 Categories=Office;Graphics;
